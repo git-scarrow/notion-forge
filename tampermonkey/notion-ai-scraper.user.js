@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         Notion AI Chat Scraper
-// @namespace    https://notion.so
+// @namespace    https://github.com/samscarrow/notion-ai-scraper
 // @version      0.3.2
-// @description  Captures Notion AI chat conversations (live + historical) and exports as Markdown or JSON
-// @author       notion-ai-scraper
+// @description  Export your Notion AI chat conversations as Markdown or JSON. Captures live streaming responses and full historical threads, including chain-of-thought, tool calls, and model info.
+// @author       samscarrow
+// @homepageURL  https://github.com/samscarrow/notion-ai-scraper
+// @supportURL   https://github.com/samscarrow/notion-ai-scraper/issues
 // @match        https://www.notion.so/*
 // @match        https://notion.so/*
 // @grant        GM_setValue
