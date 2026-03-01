@@ -190,10 +190,11 @@ async function handleSyncRecords(threads, messages) {
     if (entry._processedMsgIds.includes(msgId)) continue;
 
     if (!step.type && msg.role === "editor") {
-      // User messages in historical data have role:"editor" but no content
+      // User messages in historical data have role:"editor" but no content text
+      // Mark as processed; we'll try to backfill from transcript summaries
       entry.turns.push({
         role: "user",
-        content: "(user message)",
+        content: null,
         msgId,
         timestamp: msg.created_time ?? Date.now(),
       });

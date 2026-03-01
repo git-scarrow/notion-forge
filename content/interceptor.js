@@ -62,7 +62,13 @@
     const messages = {};
     for (const [id, rec] of Object.entries(rm.thread_message ?? {})) {
       const val = rec?.value?.value ?? rec?.value ?? {};
-      if (val.step || val.role) messages[id] = val;
+      if (val.step || val.role) {
+        messages[id] = val;
+        // DEBUG: log full structure of editor/user messages to find where user text lives
+        if (val.role === "editor" || (val.step && val.step.type === "user")) {
+          console.debug("[notion-ai-scraper] user-type message:", id, "unwrapped:", JSON.stringify(val).slice(0, 500), "raw:", JSON.stringify(rec).slice(0, 500));
+        }
+      }
     }
 
     if (!Object.keys(threads).length && !Object.keys(messages).length) return;
