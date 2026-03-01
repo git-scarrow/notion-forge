@@ -71,7 +71,10 @@
     const threads = {};
     for (const [id, rec] of Object.entries(rm.thread ?? {})) {
       const val = rec?.value?.value ?? rec?.value ?? {};
-      if (val.type === "workflow" && val.messages?.length) threads[id] = val;
+      if (val.type === "workflow" && val.messages?.length) {
+        val._parentPageId = (val.parent_id ?? "").replace(/-/g, "");
+        threads[id] = val;
+      }
     }
 
     const messages = {};
@@ -174,6 +177,7 @@
       conversation: {
         traceId: meta.traceId,
         spaceId: meta.spaceId,
+        pageId: meta.pageId ?? null,
         userMessage: meta.userMessage,
         assistantMessage: assistantContent || null,
         thinking: thinkingContent,
@@ -202,10 +206,12 @@
       } catch {}
 
       const response = await _fetch(input, init);
+      const pageIdMatch = location.pathname.match(/([0-9a-f]{32})/i);
       handleNDJSONStream(response.clone(), {
         userMessage: extractUserMessage(reqBody),
         traceId: reqBody?.traceId ?? null,
         spaceId: reqBody?.spaceId ?? null,
+        pageId: pageIdMatch ? pageIdMatch[1].toLowerCase() : null,
       });
       return response;
     }

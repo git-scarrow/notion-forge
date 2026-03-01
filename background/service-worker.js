@@ -44,11 +44,14 @@ async function handleTranscript(convo) {
     store[key] = {
       id: key,
       spaceId: convo.spaceId,
+      pageId: convo.pageId ?? null,
       model: convo.model,
       turns: [],
       toolCalls: [],
       createdAt: Date.now(),
     };
+  } else if (convo.pageId && !store[key].pageId) {
+    store[key].pageId = convo.pageId;
   }
 
   const entry = store[key];
@@ -180,6 +183,7 @@ async function handleSyncRecords(threads, messages) {
       store[key] = {
         id: key,
         threadId,
+        pageId: thread._parentPageId ?? null,
         title: thread.data?.title ?? null,
         spaceId: thread.space_id,
         model: null,
@@ -191,6 +195,7 @@ async function handleSyncRecords(threads, messages) {
     } else {
       store[key].messageOrder = thread.messages;
       if (thread.data?.title) store[key].title = thread.data.title;
+      if (thread._parentPageId && !store[key].pageId) store[key].pageId = thread._parentPageId;
     }
     store[key].updatedAt = Date.now();
   }
@@ -319,8 +324,8 @@ async function getConversations(pageId) {
     .filter((c) => {
       if (!c.turns?.length) return false;
       if (!pageId) return false;
-      const tid = (c.threadId ?? "").replace(/-/g, "");
-      return tid === pageId.replace(/-/g, "");
+      const pid = (c.pageId ?? "").replace(/-/g, "");
+      return pid === pageId.replace(/-/g, "");
     })
     .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
 }
@@ -403,8 +408,8 @@ async function exportJSON(conversationId, pageId) {
     : Object.values(store).filter((c) => {
         if (!c.turns?.length) return false;
         if (!pageId) return false;
-        const tid = (c.threadId ?? "").replace(/-/g, "");
-        return tid === pageId.replace(/-/g, "");
+        const pid = (c.pageId ?? "").replace(/-/g, "");
+        return pid === pageId.replace(/-/g, "");
       });
   const cleaned = JSON.stringify(data, (key, val) =>
     key === "_processedMsgIds" || key === "messageOrder" ? undefined : val
