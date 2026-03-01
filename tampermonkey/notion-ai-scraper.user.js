@@ -10,6 +10,7 @@
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
+// @license      MIT
 // @run-at       document-start
 // ==/UserScript==
 
