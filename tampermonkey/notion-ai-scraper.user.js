@@ -117,12 +117,8 @@
       if (!entry._processedMsgIds) entry._processedMsgIds = [];
 
       if (!step.type && msg.role === "editor") {
-        entry.turns.push({
-          role: "user",
-          content: "(user message)",
-          msgId,
-          timestamp: msg.created_time ?? Date.now(),
-        });
+        // Editor-role messages without a step have no content (cached stub).
+        // Real user messages arrive with step.type === "user" and contain text.
         entry._processedMsgIds.push(msgId);
       } else if (step.type === "agent-inference") {
         const turn = extractInferenceTurn(step);
