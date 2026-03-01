@@ -1,24 +1,169 @@
 // ==UserScript==
 // @name         Notion AI Chat Scraper
 // @namespace    https://notion.so
-// @version      0.3.0
+// @version      0.3.1
 // @description  Captures Notion AI chat conversations (live + historical) and exports as Markdown or JSON
 // @author       notion-ai-scraper
 // @match        https://www.notion.so/*
 // @match        https://notion.so/*
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @grant        GM_download
 // @grant        GM_registerMenuCommand
 // @run-at       document-start
 // ==/UserScript==
 
+/**
+ * Architecture:
+ *   GM_* grants cause Tampermonkey to run in a sandbox — window.fetch patches
+ *   there don't affect the real page. We inject a <script> tag into the page's
+ *   MAIN world that patches fetch and posts captured data via window.postMessage.
+ *   This script listens for those messages and stores them via GM_setValue.
+ */
 (function () {
   "use strict";
 
+  const MSG_TAG = "__notion_ai_scraper__";
   const STORAGE_KEY = "notion_ai_conversations";
+
+  // ── Inject page-world interceptor ─────────────────────────────────────────
+
+  const pageScript = `(function () {
+  "use strict";
+  const MSG_TAG = "__notion_ai_scraper__";
   const LIVE_PATH = "/api/v3/runInferenceTranscript";
   const SYNC_PATH = "/api/v3/syncRecordValuesSpaceInitial";
+
+  function emit(payload) {
+    window.postMessage({ tag: MSG_TAG, payload }, "*");
+  }
+
+  function cleanText(text) {
+    return text
+      .replace(/<lang[^>]*\\/>/g, "")
+      .replace(/<edit_reference[^>]*>[\\s\\S]*?<\\/edit_reference>/g, "")
+      .trim();
+  }
+
+  function extractRichText(value) {
+    if (!Array.isArray(value)) return typeof value === "string" ? value.trim() : null;
+    return value.map((chunk) => {
+      if (!Array.isArray(chunk)) return typeof chunk === "string" ? chunk : "";
+      const text = chunk[0] ?? "";
+      const annotations = chunk[1];
+      if (text === "\\u2023" && Array.isArray(annotations)) {
+        for (const ann of annotations) {
+          if (Array.isArray(ann) && ann.length >= 2) {
+            if (ann[0] === "p") return "[page:" + ann[1] + "]";
+            if (ann[0] === "u") return "[user:" + ann[1] + "]";
+            if (ann[0] === "a") return "[agent:" + ann[1] + "]";
+          }
+        }
+      }
+      return text;
+    }).join("").trim() || null;
+  }
+
+  function extractUserMessage(reqBody) {
+    if (!reqBody?.transcript) return null;
+    const userEntries = reqBody.transcript.filter((e) => e.type === "user");
+    const last = userEntries.at(-1);
+    if (!last?.value) return null;
+    return extractRichText(last.value);
+  }
+
+  function handleSyncResponse(data) {
+    const rm = data?.recordMap ?? {};
+    const threads = {};
+    for (const [id, rec] of Object.entries(rm.thread ?? {})) {
+      const val = rec?.value?.value ?? rec?.value ?? {};
+      if (val.type === "workflow" && val.messages?.length) threads[id] = val;
+    }
+    const messages = {};
+    for (const [id, rec] of Object.entries(rm.thread_message ?? {})) {
+      const val = rec?.value?.value ?? rec?.value ?? {};
+      if (val.step || val.role) messages[id] = val;
+    }
+    if (!Object.keys(threads).length && !Object.keys(messages).length) return;
+    emit({ type: "SYNC_RECORDS", threads, messages });
+  }
+
+  async function handleNDJSONStream(response, meta) {
+    const reader = response.body?.getReader();
+    if (!reader) return;
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const lines = [];
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\\n");
+        buffer = parts.pop() ?? "";
+        for (const p of parts) {
+          const t = p.trim();
+          if (!t) continue;
+          try { lines.push(JSON.parse(t)); } catch {}
+        }
+      }
+      if (buffer.trim()) { try { lines.push(JSON.parse(buffer.trim())); } catch {} }
+    } catch {}
+    if (lines.length) emit({ type: "TRANSCRIPT", lines, meta });
+  }
+
+  const _fetch = window.fetch.bind(window);
+  window.fetch = async function (input, init) {
+    const url = typeof input === "string" ? input : input?.url ?? "";
+    let path = "";
+    try { path = new URL(url, location.origin).pathname; } catch {}
+
+    if (path === LIVE_PATH) {
+      let reqBody = null;
+      try {
+        const raw = init?.body ?? (input instanceof Request ? await input.clone().text() : null);
+        if (raw) reqBody = JSON.parse(raw);
+      } catch {}
+      const response = await _fetch(input, init);
+      handleNDJSONStream(response.clone(), {
+        userMessage: extractUserMessage(reqBody),
+        traceId: reqBody?.traceId ?? null,
+        spaceId: reqBody?.spaceId ?? null,
+      });
+      return response;
+    }
+
+    if (path === SYNC_PATH) {
+      const response = await _fetch(input, init);
+      response.clone().json().then((data) => {
+        try { handleSyncResponse(data); } catch {}
+      }).catch(() => {});
+      return response;
+    }
+
+    return _fetch(input, init);
+  };
+
+  console.debug("[notion-ai-scraper] v0.3.1 page-world interceptor active");
+})();`;
+
+  const script = document.createElement("script");
+  script.textContent = pageScript;
+  (document.head ?? document.documentElement).appendChild(script);
+  script.remove();
+
+  // ── Receive messages from page world ──────────────────────────────────────
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window || event.data?.tag !== MSG_TAG) return;
+    const { payload } = event.data;
+    if (!payload?.type) return;
+
+    if (payload.type === "TRANSCRIPT") {
+      handleTranscript(payload.lines, payload.meta);
+    } else if (payload.type === "SYNC_RECORDS") {
+      handleSyncRecords(payload.threads, payload.messages);
+    }
+  });
 
   // ── Storage ───────────────────────────────────────────────────────────────
 
@@ -30,7 +175,7 @@
     GM_setValue(STORAGE_KEY, JSON.stringify(store));
   }
 
-  // ── Shared text cleaning ──────────────────────────────────────────────────
+  // ── Shared helpers ────────────────────────────────────────────────────────
 
   function cleanText(text) {
     return text
@@ -39,234 +184,46 @@
       .trim();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // HISTORICAL CHAT: syncRecordValuesSpaceInitial → thread + thread_message
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  function handleSyncResponse(data) {
-    const rm = data?.recordMap ?? {};
-
-    // Collect threads (contain message ordering + title)
-    const threads = {};
-    for (const [id, rec] of Object.entries(rm.thread ?? {})) {
-      const val = rec?.value?.value ?? rec?.value ?? {};
-      if (val.type === "workflow" && val.messages?.length) {
-        threads[id] = val;
-      }
-    }
-
-    // Collect thread_messages
-    const messages = {};
-    for (const [id, rec] of Object.entries(rm.thread_message ?? {})) {
-      const val = rec?.value?.value ?? rec?.value ?? {};
-      if (val.step || val.role) messages[id] = val;
-    }
-
-    if (!Object.keys(threads).length && !Object.keys(messages).length) return;
-
-    const store = loadStore();
-
-    // Process each thread we find
-    for (const [threadId, thread] of Object.entries(threads)) {
-      const key = `thread-${threadId}`;
-      if (!store[key]) {
-        store[key] = {
-          id: key,
-          threadId,
-          title: thread.data?.title ?? null,
-          spaceId: thread.space_id,
-          model: null,
-          turns: [],
-          toolCalls: [],
-          createdAt: thread.created_time ?? Date.now(),
-          messageOrder: thread.messages,
-        };
-      } else {
-        // Update message order if we get a newer version
-        store[key].messageOrder = thread.messages;
-        if (thread.data?.title) store[key].title = thread.data.title;
-      }
-      store[key].updatedAt = Date.now();
-    }
-
-    // Process thread_messages into turns
-    for (const [msgId, msg] of Object.entries(messages)) {
-      const step = msg.step ?? {};
-      const parentThread = msg.parent_id;
-      const key = `thread-${parentThread}`;
-
-      // Ensure thread entry exists
-      if (!store[key]) {
-        store[key] = {
-          id: key,
-          threadId: parentThread,
-          title: null,
-          spaceId: msg.space_id,
-          model: null,
-          turns: [],
-          toolCalls: [],
-          createdAt: msg.created_time ?? Date.now(),
-          messageOrder: [],
-        };
-      }
-
-      const entry = store[key];
-
-      // Skip if we already processed this message
-      if (entry._processedMsgIds?.includes(msgId)) continue;
-      if (!entry._processedMsgIds) entry._processedMsgIds = [];
-
-      if (!step.type && msg.role === "editor") {
-        // Editor-role messages without a step have no content (cached stub).
-        // Real user messages arrive with step.type === "user" and contain text.
-        entry._processedMsgIds.push(msgId);
-      } else if (step.type === "agent-inference") {
-        const turn = extractInferenceTurn(step);
-        if (turn) {
-          turn.msgId = msgId;
-          turn.timestamp = msg.created_time ?? Date.now();
-          entry.turns.push(turn);
-          entry._processedMsgIds.push(msgId);
-          if (turn.model) entry.model = turn.model;
-        }
-      } else if (step.type === "user" || step.type === "human") {
-        const content = extractRichText(step.value);
-        if (content) {
-          entry.turns.push({
-            role: "user",
-            content,
-            msgId,
-            timestamp: msg.created_time ?? Date.now(),
-          });
-          entry._processedMsgIds.push(msgId);
-        }
-      } else if (step.type === "agent-tool-result" && step.state !== "pending") {
-        if (step.toolName) {
-          entry.toolCalls.push({ tool: step.toolName, input: step.input ?? {} });
-        }
-        entry._processedMsgIds.push(msgId);
-      } else {
-        // config, context, user-specified-context, agent-turn-full-record-map, etc.
-        entry._processedMsgIds.push(msgId);
-      }
-
-      entry.updatedAt = Date.now();
-    }
-
-    // Sort turns by message order from thread
-    for (const entry of Object.values(store)) {
-      if (!entry.messageOrder?.length || entry.turns.length < 2) continue;
-      const order = entry.messageOrder;
-      entry.turns.sort((a, b) => {
-        const ai = order.indexOf(a.msgId);
-        const bi = order.indexOf(b.msgId);
-        // Messages not in order list go to end, sorted by timestamp
-        if (ai === -1 && bi === -1) return (a.timestamp ?? 0) - (b.timestamp ?? 0);
-        if (ai === -1) return 1;
-        if (bi === -1) return -1;
-        return ai - bi;
-      });
-    }
-
-    saveStore(store);
-
-    const newThreads = Object.keys(threads).length;
-    const newMsgs = Object.keys(messages).length;
-    if (newThreads || newMsgs) {
-      console.debug(`[notion-ai-scraper] sync: ${newThreads} thread(s), ${newMsgs} message(s)`);
-    }
-  }
-
-  /** Extract an assistant turn from an agent-inference step */
-  function extractInferenceTurn(step) {
-    const values = step.value ?? [];
-    if (!Array.isArray(values)) return null;
-
-    const responseParts = [];
-    let thinkingContent = null;
-    let model = step.model ?? null;
-
-    for (const item of values) {
-      if (item.type === "text") {
-        const cleaned = cleanText(item.content ?? "");
-        if (cleaned) responseParts.push(cleaned);
-      } else if (item.type === "thinking") {
-        thinkingContent = (item.content ?? "").trim() || null;
-      }
-      // Skip tool_use items — those are tool call args
-    }
-
-    const content = responseParts.join("\n").trim();
-    if (!content) return null;
-
-    const turn = { role: "assistant", content };
-    if (thinkingContent) turn.thinking = thinkingContent;
-    if (model) turn.model = model;
-    return turn;
-  }
-
-  /** Extract plain text from Notion rich-text array [[text], [text, [[annotation]]]] */
   function extractRichText(value) {
     if (!Array.isArray(value)) return typeof value === "string" ? value.trim() : null;
-    return value
-      .map((chunk) => {
-        if (!Array.isArray(chunk)) return typeof chunk === "string" ? chunk : "";
-        const text = chunk[0] ?? "";
-        const annotations = chunk[1];
-        if (text === "\u2023" && Array.isArray(annotations)) {
-          for (const ann of annotations) {
-            if (Array.isArray(ann) && ann.length >= 2) {
-              if (ann[0] === "p") return `[page:${ann[1]}]`;
-              if (ann[0] === "u") return `[user:${ann[1]}]`;
-              if (ann[0] === "a") return `[agent:${ann[1]}]`;
-            }
+    return value.map((chunk) => {
+      if (!Array.isArray(chunk)) return typeof chunk === "string" ? chunk : "";
+      const text = chunk[0] ?? "";
+      const annotations = chunk[1];
+      if (text === "\u2023" && Array.isArray(annotations)) {
+        for (const ann of annotations) {
+          if (Array.isArray(ann) && ann.length >= 2) {
+            if (ann[0] === "p") return `[page:${ann[1]}]`;
+            if (ann[0] === "u") return `[user:${ann[1]}]`;
+            if (ann[0] === "a") return `[agent:${ann[1]}]`;
           }
         }
-        return text;
-      })
-      .join("").trim() || null;
+      }
+      return text;
+    }).join("").trim() || null;
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // LIVE CHAT: runInferenceTranscript → NDJSON streaming
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ── TRANSCRIPT handler (live chat) ────────────────────────────────────────
 
-  function extractUserMessage(reqBody) {
-    if (!reqBody?.transcript) return null;
-    const userEntries = reqBody.transcript.filter((e) => e.type === "user");
-    const last = userEntries.at(-1);
-    if (!last?.value) return null;
-    return extractRichText(last.value);
-  }
-
-  function processNDJSON(lines, meta) {
+  function handleTranscript(ndjsonLines, meta) {
     const contentByPath = {};
     const steps = [];
     const toolResults = [];
 
-    for (const obj of lines) {
+    for (const obj of ndjsonLines) {
       if (obj.type !== "patch") continue;
       for (const v of obj.v ?? []) {
-        const op = v.o;
-        const path = v.p ?? "";
-        const val = v.v;
-
-        if (op === "a" && path.endsWith("/-") && typeof val === "object" && val !== null) {
-          if (val.type === "agent-inference") {
-            steps.push({ id: val.id, model: null });
-          } else if (val.type === "agent-tool-result") {
-            toolResults.push({ toolName: val.toolName, state: val.state, input: val.input });
-          }
+        const op = v.o, path = v.p ?? "", val = v.v;
+        if (op === "a" && path.endsWith("/-") && val !== null && typeof val === "object") {
+          if (val.type === "agent-inference") steps.push({ id: val.id, model: null });
+          else if (val.type === "agent-tool-result") toolResults.push({ toolName: val.toolName, state: val.state, input: val.input });
         }
-        if (op === "x" && path.includes("/content") && typeof val === "string") {
-          contentByPath[path] = (contentByPath[path] ?? "") + val;
-        }
-        if (op === "p" && path.includes("/content") && typeof val === "string") {
-          contentByPath[path] = val;
+        if ((op === "x" || op === "p") && path.includes("/content") && typeof val === "string") {
+          contentByPath[path] = op === "x" ? (contentByPath[path] ?? "") + val : val;
         }
         if (op === "a" && path.includes("/model") && typeof val === "string") {
-          const lastStep = steps.at(-1);
-          if (lastStep) lastStep.model = val;
+          const last = steps.at(-1);
+          if (last) last.model = val;
         }
       }
     }
@@ -281,7 +238,6 @@
     }
     inferenceTexts.sort((a, b) => a.stepIdx - b.stepIdx || a.valueIdx - b.valueIdx);
 
-    // Separate CoT from user-facing
     const stepGroups = new Map();
     for (const t of inferenceTexts) {
       if (!stepGroups.has(t.stepIdx)) stepGroups.set(t.stepIdx, []);
@@ -289,138 +245,123 @@
     }
     const groupKeys = [...stepGroups.keys()].sort((a, b) => a - b);
     const lastGroup = groupKeys.at(-1);
-    const responseParts = [];
-    const thinkingParts = [];
+    const responseParts = [], thinkingParts = [];
     for (const key of groupKeys) {
       const texts = stepGroups.get(key).map((t) => t.content);
-      if (key === lastGroup) {
-        responseParts.push(...texts);
-      } else {
-        for (const text of texts) {
-          if (text.length > 200) thinkingParts.push(text);
-          else responseParts.push(text);
-        }
-      }
+      if (key === lastGroup) responseParts.push(...texts);
+      else for (const text of texts) { if (text.length > 200) thinkingParts.push(text); else responseParts.push(text); }
     }
 
     const assistantContent = cleanText(responseParts.join("\n"));
     const thinkingContent = thinkingParts.join("\n").trim() || null;
-
     if (!assistantContent && !meta.userMessage) return;
 
     const key = meta.traceId ?? `unknown-${Date.now()}`;
     const store = loadStore();
-
     if (!store[key]) {
-      store[key] = {
-        id: key,
-        spaceId: meta.spaceId,
-        model: null,
-        turns: [],
-        toolCalls: [],
-        createdAt: Date.now(),
-      };
+      store[key] = { id: key, spaceId: meta.spaceId, model: null, turns: [], toolCalls: [], createdAt: Date.now() };
     }
-
     const entry = store[key];
-
     if (meta.userMessage) {
-      const lastUserTurn = entry.turns.findLast((t) => t.role === "user");
-      if (!(lastUserTurn && lastUserTurn.content === meta.userMessage && Math.abs((lastUserTurn.timestamp ?? 0) - Date.now()) < 2000)) {
+      const lastUser = entry.turns.findLast((t) => t.role === "user");
+      if (!(lastUser && lastUser.content === meta.userMessage && Math.abs((lastUser.timestamp ?? 0) - Date.now()) < 2000)) {
         entry.turns.push({ role: "user", content: meta.userMessage, timestamp: Date.now() });
       }
     }
-
     if (assistantContent) {
       const turn = { role: "assistant", content: assistantContent, timestamp: Date.now() };
       if (thinkingContent) turn.thinking = thinkingContent;
       entry.turns.push(turn);
     }
-
     entry.model = steps.find((s) => s.model)?.model ?? entry.model;
     const fc = toolResults.filter((t) => t.toolName && t.state !== "pending").map((t) => ({ tool: t.toolName, input: t.input }));
     if (fc.length) entry.toolCalls.push(...fc);
     entry.updatedAt = Date.now();
     saveStore(store);
-
-    console.debug(`[notion-ai-scraper] live: trace ${key}, user="${(meta.userMessage ?? "").slice(0, 40)}" assistant=${assistantContent.length} chars`);
+    console.debug(`[notion-ai-scraper] live: trace ${key}, turns=${entry.turns.length}`);
   }
 
-  async function handleNDJSONStream(response, meta) {
-    const reader = response.body?.getReader();
-    if (!reader) return;
-    const decoder = new TextDecoder();
-    let buffer = "";
-    const ndjsonLines = [];
+  // ── SYNC_RECORDS handler (historical chat) ────────────────────────────────
 
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          try { ndjsonLines.push(JSON.parse(trimmed)); } catch {}
-        }
+  function handleSyncRecords(threads, messages) {
+    if (!threads && !messages) return;
+    const store = loadStore();
+
+    for (const [threadId, thread] of Object.entries(threads ?? {})) {
+      const key = `thread-${threadId}`;
+      if (!store[key]) {
+        store[key] = {
+          id: key, threadId, title: thread.data?.title ?? null, spaceId: thread.space_id,
+          model: null, turns: [], toolCalls: [], createdAt: thread.created_time ?? Date.now(),
+          messageOrder: thread.messages,
+        };
+      } else {
+        store[key].messageOrder = thread.messages;
+        if (thread.data?.title) store[key].title = thread.data.title;
       }
-      if (buffer.trim()) {
-        try { ndjsonLines.push(JSON.parse(buffer.trim())); } catch {}
-      }
-    } catch (err) {
-      console.warn("[notion-ai-scraper] NDJSON read error:", err);
+      store[key].updatedAt = Date.now();
     }
 
-    if (ndjsonLines.length > 0) processNDJSON(ndjsonLines, meta);
-  }
+    for (const [msgId, msg] of Object.entries(messages ?? {})) {
+      const step = msg.step ?? {};
+      const key = `thread-${msg.parent_id}`;
+      if (!store[key]) {
+        store[key] = {
+          id: key, threadId: msg.parent_id, title: null, spaceId: msg.space_id,
+          model: null, turns: [], toolCalls: [], createdAt: msg.created_time ?? Date.now(), messageOrder: [],
+        };
+      }
+      const entry = store[key];
+      if (!entry._processedMsgIds) entry._processedMsgIds = [];
+      if (entry._processedMsgIds.includes(msgId)) continue;
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // FETCH INTERCEPT
-  // ═══════════════════════════════════════════════════════════════════════════
+      if (!step.type && msg.role === "editor") {
+        // Cached stub — no content
+        entry._processedMsgIds.push(msgId);
+      } else if (step.type === "agent-inference") {
+        const values = step.value ?? [];
+        const responseParts = [], thinkingParts = [];
+        let model = step.model ?? null;
+        for (const item of (Array.isArray(values) ? values : [])) {
+          if (item.type === "text") { const c = cleanText(item.content ?? ""); if (c) responseParts.push(c); }
+          else if (item.type === "thinking") { const c = (item.content ?? "").trim(); if (c) thinkingParts.push(c); }
+        }
+        const content = responseParts.join("\n").trim();
+        if (content) {
+          const turn = { role: "assistant", content, msgId, timestamp: msg.created_time ?? Date.now() };
+          if (thinkingParts.length) turn.thinking = thinkingParts.join("\n");
+          if (model) { turn.model = model; entry.model = model; }
+          entry.turns.push(turn);
+        }
+        entry._processedMsgIds.push(msgId);
+      } else if (step.type === "user" || step.type === "human") {
+        const content = extractRichText(step.value);
+        if (content) {
+          entry.turns.push({ role: "user", content, msgId, timestamp: msg.created_time ?? Date.now() });
+          entry._processedMsgIds.push(msgId);
+        }
+      } else {
+        entry._processedMsgIds.push(msgId);
+      }
+      entry.updatedAt = Date.now();
+    }
 
-  const _fetch = window.fetch.bind(window);
-
-  window.fetch = async function (input, init) {
-    const url = typeof input === "string" ? input : input?.url ?? "";
-    let path;
-    try { path = new URL(url, location.origin).pathname; } catch { path = ""; }
-
-    // Live AI chat
-    if (path === LIVE_PATH) {
-      let reqBody = null;
-      try {
-        const raw = init?.body ?? (input instanceof Request ? await input.clone().text() : null);
-        if (raw) reqBody = JSON.parse(raw);
-      } catch {}
-
-      const response = await _fetch(input, init);
-      handleNDJSONStream(response.clone(), {
-        userMessage: extractUserMessage(reqBody),
-        traceId: reqBody?.traceId ?? null,
-        spaceId: reqBody?.spaceId ?? null,
+    for (const entry of Object.values(store)) {
+      if (!entry.messageOrder?.length || entry.turns.length < 2) continue;
+      const order = entry.messageOrder;
+      entry.turns.sort((a, b) => {
+        const ai = order.indexOf(a.msgId), bi = order.indexOf(b.msgId);
+        if (ai === -1 && bi === -1) return (a.timestamp ?? 0) - (b.timestamp ?? 0);
+        if (ai === -1) return 1; if (bi === -1) return -1;
+        return ai - bi;
       });
-      return response;
     }
 
-    // Historical chat via sync
-    if (path === SYNC_PATH) {
-      const response = await _fetch(input, init);
-      response.clone().json().then((data) => {
-        try { handleSyncResponse(data); } catch (err) {
-          console.warn("[notion-ai-scraper] sync parse error:", err);
-        }
-      }).catch(() => {});
-      return response;
-    }
+    saveStore(store);
+    console.debug(`[notion-ai-scraper] sync: ${Object.keys(threads ?? {}).length} thread(s), ${Object.keys(messages ?? {}).length} msg(s)`);
+  }
 
-    return _fetch(input, init);
-  };
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // EXPORT
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ── Menu commands ─────────────────────────────────────────────────────────
 
   function toMarkdown(store) {
     return Object.values(store)
@@ -442,7 +383,7 @@
       }).join("\n\n===\n\n");
   }
 
-  function downloadBlob(content, filename, mime) {
+  function downloadText(content, filename, mime) {
     const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -450,46 +391,37 @@
     URL.revokeObjectURL(url);
   }
 
-  // ── Menu commands ─────────────────────────────────────────────────────────
-
   GM_registerMenuCommand("Export All → Markdown", () => {
     const store = loadStore();
     const withTurns = Object.values(store).filter((c) => c.turns?.length);
     if (!withTurns.length) { alert("No conversations captured yet."); return; }
-    downloadBlob(toMarkdown(store), `notion-ai-${Date.now()}.md`, "text/markdown");
+    downloadText(toMarkdown(store), `notion-ai-${Date.now()}.md`, "text/markdown");
   });
 
   GM_registerMenuCommand("Export All → JSON", () => {
     const store = loadStore();
     const withTurns = Object.values(store).filter((c) => c.turns?.length);
     if (!withTurns.length) { alert("No conversations captured yet."); return; }
-    const data = withTurns.map((c) => {
-      const { _processedMsgIds, messageOrder, ...clean } = c;
-      return clean;
-    });
-    downloadBlob(JSON.stringify(data, null, 2), `notion-ai-${Date.now()}.json`, "application/json");
+    const data = withTurns.map(({ _processedMsgIds, messageOrder, ...clean }) => clean);
+    downloadText(JSON.stringify(data, null, 2), `notion-ai-${Date.now()}.json`, "application/json");
   });
 
   GM_registerMenuCommand("Clear captured conversations", () => {
-    if (confirm("Clear all captured Notion AI conversations?")) {
-      saveStore({});
-      alert("Cleared.");
-    }
+    if (confirm("Clear all captured Notion AI conversations?")) { saveStore({}); alert("Cleared."); }
   });
 
   GM_registerMenuCommand("Show capture stats", () => {
     const store = loadStore();
     const convos = Object.values(store).filter((c) => c.turns?.length);
-    const count = convos.length;
     const turns = convos.reduce((n, c) => n + (c.turns?.length ?? 0), 0);
     const models = [...new Set(convos.map((c) => c.model).filter(Boolean))];
     const titles = convos.map((c) => c.title).filter(Boolean).slice(0, 5);
     alert(
-      `${count} conversation(s), ${turns} total turn(s)\n` +
+      `${convos.length} conversation(s), ${turns} total turn(s)\n` +
       `Models: ${models.join(", ") || "unknown"}\n` +
       (titles.length ? `Recent: ${titles.join(", ")}` : "")
     );
   });
 
-  console.log("[notion-ai-scraper] v0.3.0 active — watching live + historical chat");
+  console.log("[notion-ai-scraper] v0.3.1 active — watching live + historical chat");
 })();
