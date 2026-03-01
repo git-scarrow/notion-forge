@@ -1,6 +1,9 @@
 /**
- * Notion AI Chat Interceptor
- * Injected at document_start — monkey-patches fetch before Notion scripts load.
+ * Notion AI Chat Interceptor — Page Script
+ * Injected into the MAIN world via a <script> tag so it can
+ * monkey-patch the page's own fetch/XHR before Notion scripts load.
+ *
+ * Communicates with the content script (isolated world) via window.postMessage.
  *
  * Captures TWO sources of chat data:
  *   1. LIVE: POST /api/v3/runInferenceTranscript — NDJSON streaming
@@ -10,6 +13,7 @@
 (function () {
   "use strict";
 
+  const MSG_TAG = "__notion_ai_scraper__";
   const LIVE_PATH = "/api/v3/runInferenceTranscript";
   const SYNC_PATH = "/api/v3/syncRecordValuesSpaceInitial";
 
@@ -63,8 +67,7 @@
 
     if (!Object.keys(threads).length && !Object.keys(messages).length) return;
 
-    // Send to background for storage
-    sendToBackground({ type: "SYNC_RECORDS", threads, messages });
+    emit({ type: "SYNC_RECORDS", threads, messages });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -151,7 +154,7 @@
 
     if (!assistantContent && !meta.userMessage) return;
 
-    sendToBackground({
+    emit({
       type: "TRANSCRIPT",
       conversation: {
         traceId: meta.traceId,
@@ -195,13 +198,7 @@
     if (path === SYNC_PATH) {
       const response = await _fetch(input, init);
       response.clone().json().then((data) => {
-        try {
-          const rm = data?.recordMap ?? {};
-          const hasThread = !!rm.thread;
-          const hasMsg = !!rm.thread_message;
-          if (hasThread || hasMsg) console.debug("[notion-ai-scraper] sync response has thread data:", { thread: Object.keys(rm.thread ?? {}).length, thread_message: Object.keys(rm.thread_message ?? {}).length });
-          handleSyncResponse(data);
-        } catch (e) { console.warn("[notion-ai-scraper] handleSyncResponse error:", e); }
+        try { handleSyncResponse(data); } catch (e) { console.warn("[notion-ai-scraper] sync error:", e); }
       }).catch(() => {});
       return response;
     }
@@ -231,13 +228,11 @@
     return _XHRSend.call(this, body);
   };
 
-  // ── Message bridge ─────────────────────────────────────────────────────────
+  // ── Post to content script (isolated world) ──────────────────────────────
 
-  function sendToBackground(payload) {
-    console.debug("[notion-ai-scraper] sending to background:", payload.type,
-      payload.type === "SYNC_RECORDS"
-        ? `threads=${Object.keys(payload.threads ?? {}).length} messages=${Object.keys(payload.messages ?? {}).length}`
-        : "");
-    try { browser.runtime.sendMessage(payload).catch((err) => console.warn("[notion-ai-scraper] sendMessage error:", err)); } catch (e) { console.warn("[notion-ai-scraper] sendMessage exception:", e); }
+  function emit(payload) {
+    window.postMessage({ tag: MSG_TAG, payload }, "*");
   }
+
+  console.debug("[notion-ai-scraper] page-world interceptor active");
 })();
