@@ -85,7 +85,11 @@
 
     if (!Object.keys(threads).length && !Object.keys(messages).length) return;
 
-    emit({ type: "SYNC_RECORDS", threads, messages });
+    // Pass current page ID from URL as fallback (thread parent_id may not match)
+    const pageIdMatch = location.pathname.match(/([0-9a-f]{32})/i);
+    const currentPageId = pageIdMatch ? pageIdMatch[1].toLowerCase() : null;
+
+    emit({ type: "SYNC_RECORDS", threads, messages, currentPageId });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

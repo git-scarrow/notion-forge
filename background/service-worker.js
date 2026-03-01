@@ -20,7 +20,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
     case "TRANSCRIPT":
       return handleTranscript(msg.conversation);
     case "SYNC_RECORDS":
-      return handleSyncRecords(msg.threads, msg.messages);
+      return handleSyncRecords(msg.threads, msg.messages, msg.currentPageId);
     case "GET_CONVERSATIONS":
       return getConversations(msg.pageId);
     case "CLEAR_CONVERSATIONS":
@@ -171,7 +171,7 @@ function mergeConsecutiveTurns(turns) {
   return merged;
 }
 
-async function handleSyncRecords(threads, messages) {
+async function handleSyncRecords(threads, messages, currentPageId) {
   if (!threads && !messages) return;
 
   const store = await loadStore();
@@ -179,11 +179,12 @@ async function handleSyncRecords(threads, messages) {
   // Process threads (contain message ordering + title)
   for (const [threadId, thread] of Object.entries(threads ?? {})) {
     const key = `thread-${threadId}`;
+    const pageId = thread._parentPageId || currentPageId || null;
     if (!store[key]) {
       store[key] = {
         id: key,
         threadId,
-        pageId: thread._parentPageId ?? null,
+        pageId,
         title: thread.data?.title ?? null,
         spaceId: thread.space_id,
         model: null,
@@ -195,7 +196,7 @@ async function handleSyncRecords(threads, messages) {
     } else {
       store[key].messageOrder = thread.messages;
       if (thread.data?.title) store[key].title = thread.data.title;
-      if (thread._parentPageId && !store[key].pageId) store[key].pageId = thread._parentPageId;
+      if (pageId && !store[key].pageId) store[key].pageId = pageId;
     }
     store[key].updatedAt = Date.now();
   }
@@ -210,6 +211,7 @@ async function handleSyncRecords(threads, messages) {
       store[key] = {
         id: key,
         threadId: parentThread,
+        pageId: currentPageId || null,
         title: null,
         spaceId: msg.space_id,
         model: null,
@@ -363,8 +365,8 @@ async function exportMarkdown(conversationId, pageId) {
   const targets = convo ? [convo] : Object.values(store).filter((c) => {
     if (!c.turns?.length) return false;
     if (!pageId) return false;
-    const tid = (c.threadId ?? "").replace(/-/g, "");
-    return tid === pageId.replace(/-/g, "");
+    const pid = (c.pageId ?? "").replace(/-/g, "");
+    return pid === pageId.replace(/-/g, "");
   });
 
   const md = targets
