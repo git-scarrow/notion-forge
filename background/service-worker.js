@@ -263,9 +263,9 @@ async function saveStore(store) {
 
 async function getConversations() {
   const store = await loadStore();
-  return Object.values(store).sort(
-    (a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
-  );
+  return Object.values(store)
+    .filter((c) => c.turns?.length > 0)
+    .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
 }
 
 async function clearConversations() {
@@ -278,7 +278,7 @@ async function clearConversations() {
 async function exportMarkdown(conversationId) {
   const store = await loadStore();
   const convo = conversationId ? store[conversationId] : null;
-  const targets = convo ? [convo] : Object.values(store);
+  const targets = convo ? [convo] : Object.values(store).filter((c) => c.turns?.length > 0);
 
   const md = targets
     .map((c) => {
@@ -316,7 +316,7 @@ async function exportJSON(conversationId) {
   const store = await loadStore();
   const data = conversationId
     ? store[conversationId] ?? {}
-    : Object.values(store);
+    : Object.values(store).filter((c) => c.turns?.length > 0);
   const cleaned = JSON.stringify(data, (key, val) =>
     key === "_processedMsgIds" || key === "messageOrder" ? undefined : val
   , 2);
