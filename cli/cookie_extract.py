@@ -24,12 +24,13 @@ def get_firefox_cookies_db() -> str:
     return max(candidates, key=os.path.getmtime)
 
 
-def get_token_v2() -> str:
+def get_auth() -> tuple[str, str | None]:
     """
-    Extract token_v2 from Firefox's Notion cookies.
+    Extract token_v2 and notion_user_id from Firefox's Notion cookies
+    in a single DB copy + connection.
 
-    Copies the DB first because Firefox holds a write lock while running.
-    Raises ValueError if the cookie is not found (session expired or not logged in).
+    Returns (token_v2, user_id). user_id may be None.
+    Raises ValueError if token_v2 is not found.
     """
     db_path = get_firefox_cookies_db()
 
@@ -40,47 +41,35 @@ def get_token_v2() -> str:
         shutil.copy2(db_path, tmp_path)
         conn = sqlite3.connect(tmp_path)
         try:
-            row = conn.execute(
-                "SELECT value FROM moz_cookies "
-                "WHERE host LIKE '%notion.so' AND name='token_v2' "
-                "ORDER BY lastAccessed DESC LIMIT 1"
-            ).fetchone()
+            rows = conn.execute(
+                "SELECT name, value FROM moz_cookies "
+                "WHERE host LIKE '%notion.so' AND name IN ('token_v2', 'notion_user_id') "
+                "ORDER BY lastAccessed DESC"
+            ).fetchall()
         finally:
             conn.close()
     finally:
         os.unlink(tmp_path)
 
-    if not row:
+    cookies = {name: value for name, value in rows}
+
+    token = cookies.get("token_v2")
+    if not token:
         raise ValueError(
             "token_v2 cookie not found for notion.so. "
             "Open Firefox, log into Notion, and try again."
         )
 
-    return row[0]
+    return token, cookies.get("notion_user_id")
+
+
+def get_token_v2() -> str:
+    """Extract token_v2 from Firefox's Notion cookies."""
+    token, _ = get_auth()
+    return token
 
 
 def get_user_id() -> str | None:
-    """
-    Extract the Notion user ID from the notion_user_id cookie.
-    Returns None if not found (non-fatal — used as x-notion-active-user-header).
-    """
-    db_path = get_firefox_cookies_db()
-
-    with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tmp:
-        tmp_path = tmp.name
-
-    try:
-        shutil.copy2(db_path, tmp_path)
-        conn = sqlite3.connect(tmp_path)
-        try:
-            row = conn.execute(
-                "SELECT value FROM moz_cookies "
-                "WHERE host LIKE '%notion.so' AND name='notion_user_id' "
-                "ORDER BY lastAccessed DESC LIMIT 1"
-            ).fetchone()
-        finally:
-            conn.close()
-    finally:
-        os.unlink(tmp_path)
-
-    return row[0] if row else None
+    """Extract the Notion user ID from the notion_user_id cookie."""
+    _, user_id = get_auth()
+    return user_id

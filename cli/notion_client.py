@@ -241,6 +241,13 @@ def get_db_automations(db_page_id: str, token_v2: str,
     raw_automations = record_map.get("automation", {})
     raw_actions = record_map.get("automation_action", {})
 
+    # Build property ID → name map from collection schema
+    prop_map: dict[str, str] = {}
+    for coll_rec in record_map.get("collection", {}).values():
+        schema = coll_rec.get("value", {}).get("schema", {})
+        for pid, pdef in schema.items():
+            prop_map[pid] = pdef.get("name", pid)
+
     result = []
     for aid, arec in raw_automations.items():
         av = arec.get("value", {})
@@ -261,7 +268,7 @@ def get_db_automations(db_page_id: str, token_v2: str,
             "actions": actions,
         })
 
-    return {"automations": result}
+    return {"automations": result, "property_map": prop_map}
 
 
 # ── Write ─────────────────────────────────────────────────────────────────────

@@ -14,6 +14,8 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 
 # Allow running from project root or cli/ directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -39,26 +41,55 @@ mcp = FastMCP(
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+_collection_schemas: dict[str, dict[str, str]] = {}  # collection_id -> {prop_id: name}
+_collection_lock = threading.Lock()
+
+_auth_cache: tuple[str, str | None] | None = None
+_auth_cache_time: float = 0
+_auth_lock = threading.Lock()
+_AUTH_TTL = 300  # seconds — re-read cookies every 5 minutes
+
+_registry_cache: dict | None = None
+_registry_mtime: float = 0
+_registry_lock = threading.Lock()
+
+
 def _load_registry() -> dict:
-    """Load agents.yaml, returning {} if missing or empty."""
+    """Load agents.yaml with mtime-based caching."""
+    global _registry_cache, _registry_mtime
     if not os.path.exists(AGENTS_YAML):
         return {}
-    with open(AGENTS_YAML) as f:
-        data = yaml.safe_load(f)
-    return data if isinstance(data, dict) else {}
+    mtime = os.path.getmtime(AGENTS_YAML)
+    with _registry_lock:
+        if _registry_cache is not None and mtime == _registry_mtime:
+            return _registry_cache
+        with open(AGENTS_YAML) as f:
+            data = yaml.safe_load(f)
+        _registry_cache = data if isinstance(data, dict) else {}
+        _registry_mtime = mtime
+        return _registry_cache
 
 
 def _save_registry(registry: dict) -> None:
-    """Write registry back to agents.yaml."""
-    with open(AGENTS_YAML, "w") as f:
-        yaml.dump(registry, f, default_flow_style=False, sort_keys=False)
+    """Write registry back to agents.yaml and invalidate cache."""
+    global _registry_cache, _registry_mtime
+    with _registry_lock:
+        with open(AGENTS_YAML, "w") as f:
+            yaml.dump(registry, f, default_flow_style=False, sort_keys=False)
+        _registry_cache = registry
+        _registry_mtime = os.path.getmtime(AGENTS_YAML)
 
 
 def _get_auth() -> tuple[str, str | None]:
-    """Return (token_v2, user_id) from Firefox cookies."""
-    token = cookie_extract.get_token_v2()
-    user_id = cookie_extract.get_user_id()
-    return token, user_id
+    """Return (token_v2, user_id) with TTL caching."""
+    global _auth_cache, _auth_cache_time
+    now = time.monotonic()
+    with _auth_lock:
+        if _auth_cache is not None and (now - _auth_cache_time) < _AUTH_TTL:
+            return _auth_cache
+        _auth_cache = cookie_extract.get_auth()
+        _auth_cache_time = now
+        return _auth_cache
 
 
 def _get_agent_config(name: str) -> dict:
@@ -417,6 +448,21 @@ def get_conversation(thread: str, format: str = "json") -> str:
     return json.dumps(convo, indent=2, ensure_ascii=False)
 
 
+def _get_collection_prop_names(collection_id: str) -> dict[str, str]:
+    """Fetch and cache a collection's property ID -> name map."""
+    with _collection_lock:
+        if collection_id in _collection_schemas:
+            return _collection_schemas[collection_id]
+    token, user_id = _get_auth()
+    payload = {"requests": [{"id": collection_id, "table": "collection"}]}
+    data = notion_client._post("getRecordValues", payload, token, user_id)
+    schema = data.get("results", [{}])[0].get("value", {}).get("schema", {})
+    prop_map = {pid: pdef.get("name", pid) for pid, pdef in schema.items()}
+    with _collection_lock:
+        _collection_schemas[collection_id] = prop_map
+    return prop_map
+
+
 def _format_trigger(t: dict) -> str:
     """Format a single trigger dict as a human-readable line."""
     state = t.get("state", {})
@@ -447,22 +493,35 @@ def _format_trigger(t: dict) -> str:
         collection = state.get("collectionId", "?")
         prop_ids = state.get("propertyIds", [])
         filters = state.get("propertyFilters", {})
+        # Resolve property IDs to names via collection schema
+        prop_names = {}
+        if collection and collection != "?":
+            try:
+                prop_names = _get_collection_prop_names(collection)
+            except Exception:
+                pass  # fall back to raw IDs
+        def _pname(pid: str) -> str:
+            return prop_names.get(pid, pid)
         # Extract filter conditions for display
         conditions = []
         for f in filters.get("all", []):
+            prop_label = _pname(f.get("property", "?"))
             filt = f.get("filter", {})
             op = filt.get("operator", "?")
             raw_val = filt.get("value")
             # value can be: list of dicts, single dict, or absent
             if isinstance(raw_val, list):
                 vals = [v.get("value", v) if isinstance(v, dict) else v for v in raw_val]
-                conditions.append(f"{op}: {', '.join(str(v) for v in vals)}")
+                conditions.append(f"{prop_label} {op}: {', '.join(str(v) for v in vals)}")
             elif isinstance(raw_val, dict):
-                conditions.append(f"{op}: {raw_val.get('value', raw_val)}")
+                conditions.append(f"{prop_label} {op}: {raw_val.get('value', raw_val)}")
             else:
-                conditions.append(op)
-        cond_str = "; ".join(conditions) if conditions else f"propertyIds={prop_ids}"
-        return f"Property change: {cond_str} on {collection} [{enabled}]"
+                conditions.append(f"{prop_label} {op}")
+        watched = ", ".join(_pname(p) for p in prop_ids) if prop_ids else "?"
+        cond_str = "; ".join(conditions) if conditions else f"watches {watched}"
+        ignore_body = state.get("shouldIgnorePageContentUpdates", True)
+        body_note = "" if ignore_body else " +body_edits"
+        return f"Property change: {cond_str} on {collection}{body_note} [{enabled}]"
 
     return f"{ttype} [{enabled}]"
 
@@ -553,6 +612,10 @@ def get_db_automations(db: str) -> str:
     token, user_id = _get_auth()
     result = notion_client.get_db_automations(db_page_id, token, user_id)
     automations = result.get("automations", [])
+    prop_map = result.get("property_map", {})
+
+    def _prop_name(pid: str) -> str:
+        return prop_map.get(pid, pid)
 
     if not automations:
         return f"No automations found on database {db_page_id}."
@@ -567,7 +630,7 @@ def get_db_automations(db: str) -> str:
         event = trigger.get("event", {})
         if event.get("pagePropertiesEdited"):
             filters = event["pagePropertiesEdited"].get("all", [])
-            props = [f"{f['property']} ({f['filter']['operator']})" for f in filters]
+            props = [f"{_prop_name(f['property'])} ({f['filter']['operator']})" for f in filters]
             lines.append(f"   Trigger: pagePropertiesEdited — {', '.join(props)}")
         elif event.get("pagesAdded"):
             lines.append("   Trigger: pagesAdded")
@@ -580,7 +643,7 @@ def get_db_automations(db: str) -> str:
             lines.append(f"     [{act['type']}]  id={act['id']}")
             config = act.get("config", {})
             if config.get("values"):
-                props_written = list(config["values"].keys())
+                props_written = [_prop_name(p) for p in config["values"].keys()]
                 lines.append(f"       writes properties: {props_written}")
             elif config:
                 lines.append(f"       config: {json.dumps(config)[:120]}")
