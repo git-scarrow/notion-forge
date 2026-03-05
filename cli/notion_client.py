@@ -420,7 +420,7 @@ def _clean_text(text: str) -> str:
 
 def _extract_inference_turn(step: dict) -> dict | None:
     """Port of extractInferenceTurn from service-worker.js."""
-    resp, think = [], None
+    resp, think, tool_uses = [], None, []
     for v in step.get("value") or []:
         if v.get("type") == "text":
             c = _clean_text(v.get("content") or "")
@@ -428,9 +428,14 @@ def _extract_inference_turn(step: dict) -> dict | None:
                 resp.append(c)
         elif v.get("type") == "thinking":
             think = (v.get("content") or "").strip() or None
-    if not resp:
+        elif v.get("type") == "tool_use":
+            tool_uses.append(v.get("name") or "unknown_tool")
+    if not resp and not tool_uses:
         return None
-    turn: dict = {"role": "assistant", "content": "\n".join(resp)}
+    content = "\n".join(resp) if resp else ""
+    if tool_uses and not resp:
+        content = f"[tool calls: {', '.join(tool_uses)}]"
+    turn: dict = {"role": "assistant", "content": content}
     if think:
         turn["thinking"] = think
     if step.get("model"):
@@ -469,7 +474,9 @@ def get_thread_conversation(thread_id: str, token_v2: str,
             "threadId": thread_id, "spaceId": space_id, "title": title,
             "turns": [], "toolCalls": [],
             "createdAt": thread.get("created_time"),
-            "updatedAt": thread.get("last_edited_time"),
+            "updatedAt": thread.get("updated_time"),
+            "createdById": thread.get("created_by_id"),
+            "updatedById": thread.get("updated_by_id"),
         }
 
     # Step 2: batch fetch messages (in order)
@@ -489,6 +496,7 @@ def get_thread_conversation(thread_id: str, token_v2: str,
         mid = message_ids[i]
         step = msg.get("step") or {}
         ts = msg.get("created_time")
+        author = msg.get("created_by_id")
 
         if step.get("type") == "agent-inference":
             turn = _extract_inference_turn(step)
@@ -496,13 +504,18 @@ def get_thread_conversation(thread_id: str, token_v2: str,
                 turn["msgId"] = mid
                 if ts:
                     turn["timestamp"] = ts
+                if author:
+                    turn["createdById"] = author
                 turns.append(turn)
 
         elif step.get("type") in ("user", "human"):
             content = _extract_rich_text(step.get("value"))
             if content:
-                turns.append({"role": "user", "content": content,
-                              "msgId": mid, "timestamp": ts})
+                turn_data = {"role": "user", "content": content,
+                             "msgId": mid, "timestamp": ts}
+                if author:
+                    turn_data["createdById"] = author
+                turns.append(turn_data)
 
         elif (step.get("type") == "agent-tool-result"
               and step.get("state") == "applied"
@@ -533,7 +546,9 @@ def get_thread_conversation(thread_id: str, token_v2: str,
         "turns": turns,
         "toolCalls": orphan_tool_calls,
         "createdAt": thread.get("created_time"),
-        "updatedAt": thread.get("last_edited_time"),
+        "updatedAt": thread.get("updated_time"),
+        "createdById": thread.get("created_by_id"),
+        "updatedById": thread.get("updated_by_id"),
     }
 
 
