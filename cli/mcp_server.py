@@ -243,10 +243,20 @@ def update_agent(
     if not new_blocks:
         return "Error: markdown produced no blocks. Check the content."
 
-    notion_client.replace_block_content(
+    stats = notion_client.diff_replace_block_content(
         cfg["block_id"], cfg["space_id"], new_blocks, token, user_id,
     )
-    msg = f"Updated {agent_name} ({len(new_blocks)} blocks)."
+    parts = []
+    if stats["unchanged"]:
+        parts.append(f"{stats['unchanged']} unchanged")
+    if stats["updated"]:
+        parts.append(f"{stats['updated']} updated")
+    if stats["inserted"]:
+        parts.append(f"{stats['inserted']} inserted")
+    if stats["deleted"]:
+        parts.append(f"{stats['deleted']} deleted")
+    detail = ", ".join(parts) if parts else "no changes"
+    msg = f"Updated {agent_name} ({detail}, {stats['ops']} ops in 1 tx)."
 
     if publish:
         result = notion_client.publish_agent(
@@ -403,14 +413,27 @@ def _conversation_to_markdown(convo: dict) -> str:
     ]
     for turn in convo.get("turns") or []:
         label = "**Notion AI**" if turn["role"] == "assistant" else "**You**"
+        parts = []
+        if turn.get("thinking"):
+            parts.append(f"<details><summary>Thinking</summary>\n\n{turn['thinking']}\n\n</details>")
         text = turn.get("content") or ""
+        if text:
+            parts.append(text)
         if turn.get("toolCalls"):
-            calls = "\n".join(
-                f"- `{tc['tool']}`: {json.dumps(tc.get('input') or {})}"
-                for tc in turn["toolCalls"]
-            )
-            text += ("\n\n" if text else "") + f"**Tool calls:**\n{calls}"
-        lines.append(f"{label}\n\n{text}\n\n---\n")
+            tc_lines = []
+            for tc in turn["toolCalls"]:
+                inp = json.dumps(tc.get("input") or {}, ensure_ascii=False)
+                tc_line = f"- `{tc['tool']}` {inp}"
+                if tc.get("result"):
+                    result_str = tc["result"] if isinstance(tc["result"], str) else json.dumps(tc["result"], ensure_ascii=False)
+                    # Truncate very long results for readability
+                    if len(result_str) > 500:
+                        result_str = result_str[:500] + "…"
+                    tc_line += f"\n  > {result_str}"
+                tc_lines.append(tc_line)
+            parts.append("**Tool calls:**\n" + "\n".join(tc_lines))
+        body = "\n\n".join(parts) if parts else "(empty turn)"
+        lines.append(f"{label}\n\n{body}\n\n---\n")
     if convo.get("toolCalls"):
         lines.append("**Additional tool calls (pre-inference):**")
         for tc in convo["toolCalls"]:

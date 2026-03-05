@@ -290,11 +290,20 @@ def _block_pointer(block_id: str, space_id: str) -> dict:
     return {"table": "block", "id": block_id, "spaceId": space_id}
 
 
-def delete_block(block_id: str, parent_id: str, space_id: str,
-                 token_v2: str, user_id: str | None = None,
-                 dry_run: bool = False) -> None:
-    """Soft-delete a block and remove it from its parent's content list."""
-    ops = [
+def send_ops(space_id: str, ops: list[dict],
+             token_v2: str, user_id: str | None = None,
+             dry_run: bool = False) -> None:
+    """Send a batch of operations in a single transaction."""
+    if not ops:
+        return
+    _post("saveTransactionsFanout", _tx(space_id, ops), token_v2, user_id, dry_run)
+
+
+# ── Op collectors (build ops without sending) ────────────────────────────────
+
+def _ops_delete_block(block_id: str, parent_id: str, space_id: str) -> list[dict]:
+    """Return ops to soft-delete a block and remove from parent content."""
+    return [
         {
             "pointer": _block_pointer(block_id, space_id),
             "path": [],
@@ -308,17 +317,11 @@ def delete_block(block_id: str, parent_id: str, space_id: str,
             "args": {"id": block_id},
         },
     ]
-    _post("saveTransactionsFanout", _tx(space_id, ops), token_v2, user_id, dry_run)
 
 
-def insert_block(block: dict, parent_id: str, after_id: str | None,
-                 space_id: str, token_v2: str, user_id: str | None = None,
-                 dry_run: bool = False) -> str:
-    """
-    Insert a new block into parent_id after after_id (or at start if None).
-    If the block has a 'children' key, inserts them recursively.
-    Returns the new block's ID.
-    """
+def _ops_insert_block(block: dict, parent_id: str, after_id: str | None,
+                      space_id: str) -> tuple[list[dict], str]:
+    """Return (ops, new_block_id) to insert a block. Handles children recursively."""
     children = block.pop("children", None)
     block_id = str(uuid.uuid4())
     now = int(time.time() * 1000)
@@ -352,39 +355,338 @@ def insert_block(block: dict, parent_id: str, after_id: str | None,
             "args": list_after_args,
         },
     ]
-    _post("saveTransactionsFanout", _tx(space_id, ops), token_v2, user_id, dry_run)
 
-    # Recursively insert children
     if children:
         child_after = None
         for child_block in children:
-            child_after = insert_block(
-                child_block, block_id, child_after,
-                space_id, token_v2, user_id, dry_run,
+            child_ops, child_id = _ops_insert_block(
+                child_block, block_id, child_after, space_id,
             )
+            ops.extend(child_ops)
+            child_after = child_id
 
+    return ops, block_id
+
+
+def _ops_update_block(block_id: str, space_id: str,
+                      properties: dict, format_: dict | None = None) -> list[dict]:
+    """Return ops to update a block's properties (and optionally format) in place."""
+    ops = [
+        {
+            "pointer": _block_pointer(block_id, space_id),
+            "path": ["properties"],
+            "command": "set",
+            "args": properties,
+        },
+    ]
+    if format_ is not None:
+        ops.append({
+            "pointer": _block_pointer(block_id, space_id),
+            "path": ["format"],
+            "command": "set",
+            "args": format_,
+        })
+    return ops
+
+
+# ── Legacy single-call wrappers ──────────────────────────────────────────────
+
+def delete_block(block_id: str, parent_id: str, space_id: str,
+                 token_v2: str, user_id: str | None = None,
+                 dry_run: bool = False) -> None:
+    """Soft-delete a block and remove it from its parent's content list."""
+    send_ops(space_id, _ops_delete_block(block_id, parent_id, space_id),
+             token_v2, user_id, dry_run)
+
+
+def insert_block(block: dict, parent_id: str, after_id: str | None,
+                 space_id: str, token_v2: str, user_id: str | None = None,
+                 dry_run: bool = False) -> str:
+    """Insert a new block into parent_id after after_id (or at start if None).
+    Returns the new block's ID."""
+    ops, block_id = _ops_insert_block(block, parent_id, after_id, space_id)
+    send_ops(space_id, ops, token_v2, user_id, dry_run)
     return block_id
+
+
+# ── Block fingerprinting ─────────────────────────────────────────────────────
+
+def _title_text(block: dict) -> str:
+    """Extract plain text from a block's title property."""
+    title = block.get("properties", {}).get("title", [])
+    if not title:
+        return ""
+    return "".join(chunk[0] for chunk in title if chunk)
+
+
+def _block_fingerprint(block: dict) -> tuple:
+    """Canonical fingerprint for comparing blocks regardless of source.
+
+    Works on both API block records (have id, parent_id, etc.) and
+    builder block dicts (just type + properties). Returns a tuple of
+    (type, title_text, language, format_icon, child_fingerprints...).
+    """
+    btype = block.get("type", "text")
+    props = block.get("properties", {})
+    title = _title_text(block)
+    lang = ""
+    if "language" in props:
+        lang_val = props["language"]
+        lang = lang_val[0][0] if lang_val and lang_val[0] else ""
+    fmt = block.get("format", {}).get("page_icon", "")
+
+    # Children: from builder blocks use "children" key,
+    # from API blocks we won't recurse here (handled by diff_replace).
+    child_fps = ()
+    children = block.get("children")
+    if children:
+        child_fps = tuple(_block_fingerprint(c) for c in children)
+
+    return (btype, title, lang, fmt, child_fps)
+
+
+def _api_block_fingerprint(block: dict, blocks_map: dict) -> tuple:
+    """Fingerprint an API block record, recursing into children via blocks_map."""
+    btype = block.get("type", "text")
+    props = block.get("properties", {})
+    title = _title_text(block)
+    lang = ""
+    if "language" in props:
+        lang_val = props["language"]
+        lang = lang_val[0][0] if lang_val and lang_val[0] else ""
+    fmt = block.get("format", {}).get("page_icon", "")
+
+    child_fps = ()
+    child_ids = block.get("content", [])
+    if child_ids:
+        child_fps = tuple(
+            _api_block_fingerprint(
+                blocks_map.get(cid, {}).get("value", {}), blocks_map
+            )
+            for cid in child_ids
+            if blocks_map.get(cid, {}).get("value", {}).get("alive", True)
+        )
+
+    return (btype, title, lang, fmt, child_fps)
+
+
+# ── Diff-based replace ───────────────────────────────────────────────────────
+
+def _collect_delete_tree_ops(block_id: str, parent_id: str, space_id: str,
+                             blocks_map: dict) -> list[dict]:
+    """Collect ops to delete a block and all its descendants."""
+    ops = []
+    block = blocks_map.get(block_id, {}).get("value", {})
+    for child_id in block.get("content", []):
+        ops.extend(_collect_delete_tree_ops(child_id, block_id, space_id, blocks_map))
+    ops.extend(_ops_delete_block(block_id, parent_id, space_id))
+    return ops
+
+
+def diff_replace_block_content(
+    parent_id: str, space_id: str,
+    new_blocks: list[dict],
+    token_v2: str, user_id: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Replace block content with minimal operations using a structural diff.
+
+    Compares existing blocks to new blocks by fingerprint. Finds the longest
+    matching prefix and suffix, then only touches the changed zone in the middle.
+    Within the changed zone, blocks with matching types get in-place property
+    updates instead of delete+insert cycles.
+
+    Returns a stats dict: {unchanged, deleted, inserted, updated, ops, api_calls_saved}.
+    """
+    # 1. Read existing block tree (single API call)
+    tree = get_block_tree(parent_id, space_id, token_v2, user_id)
+    blocks_map = tree.get("recordMap", {}).get("block", {})
+
+    parent_block = blocks_map.get(parent_id, {}).get("value", {})
+    existing_ids = parent_block.get("content", [])
+
+    # Build fingerprints for existing blocks
+    existing_fps = []
+    for bid in existing_ids:
+        bdata = blocks_map.get(bid, {}).get("value", {})
+        if not bdata or not bdata.get("alive", True):
+            continue
+        existing_fps.append((bid, _api_block_fingerprint(bdata, blocks_map)))
+
+    # Build fingerprints for new blocks
+    new_fps = [_block_fingerprint(b) for b in new_blocks]
+
+    # 2. Find longest matching prefix
+    prefix_len = 0
+    for i in range(min(len(existing_fps), len(new_fps))):
+        if existing_fps[i][1] == new_fps[i]:
+            prefix_len = i + 1
+        else:
+            break
+
+    # 3. Find longest matching suffix (after prefix)
+    suffix_len = 0
+    max_suffix = min(len(existing_fps) - prefix_len, len(new_fps) - prefix_len)
+    for i in range(1, max_suffix + 1):
+        if existing_fps[-i][1] == new_fps[-i]:
+            suffix_len = i
+        else:
+            break
+
+    # 4. Determine changed zone boundaries
+    old_start = prefix_len
+    old_end = len(existing_fps) - suffix_len
+    new_start = prefix_len
+    new_end = len(new_fps) - suffix_len
+
+    n_unchanged = prefix_len + suffix_len
+    n_deleted = 0
+    n_inserted = 0
+    n_updated = 0
+
+    # 5. Nothing changed — no-op
+    if old_start >= old_end and new_start >= new_end:
+        return {
+            "unchanged": n_unchanged, "deleted": 0, "inserted": 0,
+            "updated": 0, "ops": 0, "api_calls_saved": len(existing_fps),
+        }
+
+    ops: list[dict] = []
+
+    # 6. Within the changed zone, try in-place updates where types match
+    old_zone = existing_fps[old_start:old_end]
+    new_zone = new_blocks[new_start:new_end]
+
+    # Walk both zones: update in place when type matches, else delete old / insert new
+    i_old, i_new = 0, 0
+    # Track which old blocks we've consumed (for delete)
+    consumed_old: set[int] = set()
+
+    while i_old < len(old_zone) and i_new < len(new_zone):
+        old_bid, old_fp = old_zone[i_old]
+        new_fp = new_fps[new_start + i_new]
+        new_block = new_zone[i_new]
+
+        if old_fp == new_fp:
+            # Identical — skip
+            n_unchanged += 1
+            consumed_old.add(i_old)
+            i_old += 1
+            i_new += 1
+        elif old_fp[0] == new_fp[0]:
+            # Same type, different content — update in place
+            new_props = new_block.get("properties", {})
+            new_fmt = new_block.get("format")
+            ops.extend(_ops_update_block(old_bid, space_id, new_props, new_fmt))
+
+            # Handle children: if new block has children, replace them
+            new_children = new_block.get("children")
+            old_block = blocks_map.get(old_bid, {}).get("value", {})
+            old_child_ids = old_block.get("content", [])
+
+            if new_children or old_child_ids:
+                # Delete all old children
+                for cid in old_child_ids:
+                    ops.extend(_collect_delete_tree_ops(cid, old_bid, space_id, blocks_map))
+                # Insert new children
+                if new_children:
+                    child_after = None
+                    for child_block in new_children:
+                        child_ops, child_id = _ops_insert_block(
+                            child_block, old_bid, child_after, space_id,
+                        )
+                        ops.extend(child_ops)
+                        child_after = child_id
+
+            n_updated += 1
+            consumed_old.add(i_old)
+            i_old += 1
+            i_new += 1
+        else:
+            # Type mismatch — delete old block, advance old pointer
+            ops.extend(_collect_delete_tree_ops(old_bid, parent_id, space_id, blocks_map))
+            consumed_old.add(i_old)
+            n_deleted += 1
+            i_old += 1
+
+    # Delete remaining unconsumed old blocks
+    while i_old < len(old_zone):
+        old_bid, _ = old_zone[i_old]
+        if i_old not in consumed_old:
+            ops.extend(_collect_delete_tree_ops(old_bid, parent_id, space_id, blocks_map))
+            n_deleted += 1
+        i_old += 1
+
+    # Insert remaining new blocks
+    if i_new < len(new_zone):
+        # Insertion point: after the last block before the changed zone,
+        # or after the last consumed/updated old block
+        if consumed_old:
+            max_consumed = max(consumed_old)
+            # Use the last old block that was updated (not deleted) as anchor
+            after_id = old_zone[max_consumed][0]
+            # But if that block was deleted, walk back
+            while max_consumed in consumed_old and max_consumed >= 0:
+                old_bid_check = old_zone[max_consumed][0]
+                # Check if we deleted it (it'll have alive=False in our ops)
+                was_deleted = any(
+                    op.get("args", {}).get("alive") is False
+                    and op.get("pointer", {}).get("id") == old_bid_check
+                    for op in ops
+                )
+                if not was_deleted:
+                    after_id = old_bid_check
+                    break
+                max_consumed -= 1
+            else:
+                # All old blocks in zone were deleted; anchor to prefix
+                after_id = existing_fps[prefix_len - 1][0] if prefix_len > 0 else None
+        else:
+            after_id = existing_fps[prefix_len - 1][0] if prefix_len > 0 else None
+
+        while i_new < len(new_zone):
+            insert_ops, new_id = _ops_insert_block(
+                new_zone[i_new], parent_id, after_id, space_id,
+            )
+            ops.extend(insert_ops)
+            after_id = new_id
+            n_inserted += 1
+            i_new += 1
+
+    # 7. Send all ops in a single transaction
+    send_ops(space_id, ops, token_v2, user_id, dry_run)
+
+    # How many API calls the old approach would have made
+    old_approach_calls = len(existing_ids) + len(new_blocks)
+
+    return {
+        "unchanged": n_unchanged,
+        "deleted": n_deleted,
+        "inserted": n_inserted,
+        "updated": n_updated,
+        "ops": len(ops),
+        "api_calls_saved": max(0, old_approach_calls - 1),
+    }
 
 
 def replace_block_content(parent_id: str, space_id: str,
                           new_blocks: list[dict],
                           token_v2: str, user_id: str | None = None,
                           dry_run: bool = False) -> None:
-    """
-    Replace all children of parent_id with new_blocks.
-    Deletes existing children first, then inserts new ones in order.
-    """
+    """Replace all children of parent_id with new_blocks.
+    Uses batched transaction — single API call regardless of block count."""
     existing = get_block_children(parent_id, space_id, token_v2, user_id)
 
-    print(f"  Deleting {len(existing)} existing block(s)...")
+    ops: list[dict] = []
     for child_id in existing:
-        delete_block(child_id, parent_id, space_id, token_v2, user_id, dry_run)
+        ops.extend(_ops_delete_block(child_id, parent_id, space_id))
 
-    print(f"  Inserting {len(new_blocks)} new block(s)...")
     after_id = None
     for block in new_blocks:
-        after_id = insert_block(block, parent_id, after_id, space_id,
-                                token_v2, user_id, dry_run)
+        insert_ops, after_id = _ops_insert_block(block, parent_id, after_id, space_id)
+        ops.extend(insert_ops)
+
+    send_ops(space_id, ops, token_v2, user_id, dry_run)
 
 
 # ── Conversations ─────────────────────────────────────────────────────────────
@@ -419,25 +721,41 @@ def _clean_text(text: str) -> str:
 
 
 def _extract_inference_turn(step: dict) -> dict | None:
-    """Port of extractInferenceTurn from service-worker.js."""
-    resp, think, tool_uses = [], None, []
+    """Extract an assistant turn from an agent-inference step.
+
+    Captures text, thinking, and tool_use values. Tool uses are stored
+    as inline toolCalls with id + name + input so that subsequent
+    agent-tool-result messages can attach their results via toolCallId.
+    """
+    resp, think, tool_calls = [], None, []
     for v in step.get("value") or []:
         if v.get("type") == "text":
             c = _clean_text(v.get("content") or "")
             if c:
                 resp.append(c)
         elif v.get("type") == "thinking":
-            think = (v.get("content") or "").strip() or None
+            t = (v.get("content") or "").strip()
+            if t:
+                think = t
         elif v.get("type") == "tool_use":
-            tool_uses.append(v.get("name") or "unknown_tool")
-    if not resp and not tool_uses:
+            tc: dict = {"tool": v.get("name") or "unknown_tool"}
+            if v.get("id"):
+                tc["toolCallId"] = v["id"]
+            raw_content = v.get("content")
+            if raw_content:
+                try:
+                    tc["input"] = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
+                except (json.JSONDecodeError, TypeError):
+                    tc["input"] = raw_content
+            tool_calls.append(tc)
+    if not resp and not tool_calls:
         return None
     content = "\n".join(resp) if resp else ""
-    if tool_uses and not resp:
-        content = f"[tool calls: {', '.join(tool_uses)}]"
     turn: dict = {"role": "assistant", "content": content}
     if think:
         turn["thinking"] = think
+    if tool_calls:
+        turn["toolCalls"] = tool_calls
     if step.get("model"):
         turn["model"] = step["model"]
     return turn
@@ -520,19 +838,43 @@ def get_thread_conversation(thread_id: str, token_v2: str,
         elif (step.get("type") == "agent-tool-result"
               and step.get("state") == "applied"
               and step.get("toolName")):
-            tool_call = {
-                "tool": step["toolName"],
-                "input": step.get("input") or {},
-                "result": step.get("result"),
-            }
-            parent_idx = next(
-                (j for j, t in enumerate(turns) if t.get("msgId") == step.get("agentStepId")),
-                -1,
-            )
-            if parent_idx >= 0:
-                turns[parent_idx].setdefault("toolCalls", []).append(tool_call)
-            else:
-                orphan_tool_calls.append(tool_call)
+            result_data = step.get("result")
+            tool_call_id = step.get("toolCallId")
+            agent_step_id = step.get("agentStepId")
+
+            # Try to merge into an existing inline toolCall via toolCallId
+            merged = False
+            if agent_step_id and tool_call_id:
+                parent_idx = next(
+                    (j for j, t in enumerate(turns) if t.get("msgId") == agent_step_id),
+                    -1,
+                )
+                if parent_idx >= 0:
+                    for tc in turns[parent_idx].get("toolCalls", []):
+                        if tc.get("toolCallId") == tool_call_id:
+                            tc["result"] = result_data
+                            if not tc.get("input") and step.get("input"):
+                                tc["input"] = step["input"]
+                            merged = True
+                            break
+
+            if not merged:
+                tool_call = {
+                    "tool": step["toolName"],
+                    "input": step.get("input") or {},
+                    "result": result_data,
+                }
+                if tool_call_id:
+                    tool_call["toolCallId"] = tool_call_id
+                # Fall back to parent matching by agentStepId
+                parent_idx = next(
+                    (j for j, t in enumerate(turns) if t.get("msgId") == agent_step_id),
+                    -1,
+                ) if agent_step_id else -1
+                if parent_idx >= 0:
+                    turns[parent_idx].setdefault("toolCalls", []).append(tool_call)
+                else:
+                    orphan_tool_calls.append(tool_call)
 
     # Derive model from first assistant turn that has one
     model = next((t.get("model") for t in turns if t.get("model")), None)
