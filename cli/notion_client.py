@@ -937,6 +937,8 @@ MODEL_NAMES = {
     "almond-croissant-low": "Sonnet 4.6",
     "oatmeal-cookie": "ChatGPT (o-series)",
     "fireworks-minimax-m2.5": "Minimax M2.5",
+    "auto": "Auto",
+    "unknown": "Auto (default)",
 }
 
 
@@ -1000,8 +1002,8 @@ def get_agent_modules(workflow_id: str, token_v2: str,
     wf = get_workflow_record(workflow_id, token_v2, user_id)
     data = wf.get("data", {})
 
-    model_raw = data.get("model", {})
-    model_type = model_raw.get("type", "unknown")
+    model_raw = data.get("model") or {}
+    model_type = model_raw.get("type") or "auto"
 
     modules_raw = data.get("modules", [])
     modules = []
