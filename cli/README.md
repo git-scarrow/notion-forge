@@ -75,6 +75,11 @@ def update_notion_agent(agent_name: str, instructions_markdown: str) -> str:
     return result.stdout + result.stderr
 ```
 
+If the agent is calling the `notion-agents` MCP server directly, prefer the
+file-based `update_agent_from_file` tool for long instruction documents. The
+Notion write path is the same, but the MCP request stays small instead of
+embedding the full Markdown body inline.
+
 ## Supported Markdown
 
 The instruction file should be standard Markdown:

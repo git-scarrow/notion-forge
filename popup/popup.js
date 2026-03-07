@@ -214,8 +214,11 @@ async function discoverAgentFromTab(tabId) {
   const results = await browser.scripting.executeScript({
     target: { tabId },
     func: () => {
-      // Extract workflow ID from URL: /agent/<id>
-      const m = location.pathname.match(/\/agent\/([0-9a-f-]+)/i);
+      // Extract workflow ID from URL:
+      //   /agent/<id>  (direct settings link)
+      //   /chat?wfv=settings&p=<id>  (settings via conversation)
+      const m = location.pathname.match(/\/agent\/([0-9a-f-]+)/i)
+        || new URLSearchParams(location.search).get('p')?.match(/^([0-9a-f-]+)$/i);
       if (!m) return { error: "Not on an agent page. Navigate to an agent's settings page first." };
       // Notion URLs use dashless UUIDs; API needs 8-4-4-4-12 format
       let wid = m[1].replace(/-/g, '');

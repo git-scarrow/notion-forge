@@ -289,17 +289,22 @@ def get_db_automations(db_page_id: str, token_v2: str,
 
 # ── Write ─────────────────────────────────────────────────────────────────────
 
-def _tx(space_id: str, operations: list[dict]) -> dict:
+def _tx(space_id: str, operations: list[dict], *,
+        user_action: str = "cli.update_agent",
+        unretryable_error_behavior: str | None = None) -> dict:
     """Wrap operations in the modern saveTransactionsFanout envelope."""
-    return {
+    payload = {
         "requestId": str(uuid.uuid4()),
         "transactions": [{
             "id": str(uuid.uuid4()),
             "spaceId": space_id,
-            "debug": {"userAction": "cli.update_agent"},
+            "debug": {"userAction": user_action},
             "operations": operations,
         }],
     }
+    if unretryable_error_behavior:
+        payload["unretryable_error_behavior"] = unretryable_error_behavior
+    return payload
 
 
 def _block_pointer(block_id: str, space_id: str) -> dict:
@@ -313,6 +318,19 @@ def send_ops(space_id: str, ops: list[dict],
     if not ops:
         return
     _post("saveTransactionsFanout", _tx(space_id, ops), token_v2, user_id, dry_run)
+
+
+def _record_value(entry: dict | None) -> dict:
+    """Unwrap recordMap entries, which sometimes nest value.value."""
+    if not isinstance(entry, dict):
+        return {}
+    value = entry.get("value")
+    if not isinstance(value, dict):
+        return {}
+    nested = value.get("value")
+    if isinstance(nested, dict):
+        return nested
+    return value
 
 
 # ── Op collectors (build ops without sending) ────────────────────────────────
@@ -953,6 +971,118 @@ def search_threads(query: str, space_id: str, token_v2: str,
     return matches
 
 
+def list_workflow_threads(workflow_id: str, space_id: str,
+                          token_v2: str, user_id: str | None = None,
+                          limit: int = 100) -> list[dict]:
+    """
+    List conversation threads for a workflow via getInferenceTranscriptsForWorkflow.
+
+    Endpoint and cursor shape verified from HAR capture (2026-03-06).
+    Returns newest-first thread metadata with keys like:
+      {id, title, created_at, updated_at, created_by_display_name, trigger_id, run_id, type}
+    """
+    threads: list[dict] = []
+    seen_ids: set[str] = set()
+    seen_cursors: set[str] = set()
+    cursor: str | None = None
+
+    while True:
+        payload = {
+            "workflowId": workflow_id,
+            "spaceId": space_id,
+            "limit": limit,
+        }
+        if cursor:
+            payload["cursor"] = cursor
+
+        data = _post("getInferenceTranscriptsForWorkflow", payload, token_v2, user_id)
+        transcripts = data.get("transcripts") or []
+        transcript_by_id = {
+            item.get("id"): item for item in transcripts
+            if isinstance(item, dict) and item.get("id")
+        }
+        record_threads = (data.get("recordMap") or {}).get("thread") or {}
+
+        raw_ids = data.get("threadIds") or list(transcript_by_id.keys())
+        for thread_id in raw_ids:
+            if not thread_id or thread_id in seen_ids:
+                continue
+
+            transcript = dict(transcript_by_id.get(thread_id) or {})
+            record = _record_value(record_threads.get(thread_id))
+            if record and record.get("alive") is False:
+                continue
+
+            record_data = record.get("data") or {}
+            meta = {
+                "id": thread_id,
+                "title": transcript.get("title") or record_data.get("title"),
+                "created_at": transcript.get("created_at") or record.get("created_time"),
+                "updated_at": transcript.get("updated_at") or record.get("updated_time"),
+                "created_by_display_name": transcript.get("created_by_display_name"),
+                "trigger_id": transcript.get("trigger_id") or record_data.get("trigger_id"),
+                "run_id": transcript.get("run_id") or record_data.get("run_id"),
+                "type": transcript.get("type") or record.get("type") or "workflow",
+            }
+            threads.append({k: v for k, v in meta.items() if v is not None})
+            seen_ids.add(thread_id)
+
+        next_cursor = data.get("nextCursor")
+        if not next_cursor or next_cursor in seen_cursors:
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+    return threads
+
+
+def archive_threads(thread_ids: list[str], space_id: str,
+                    token_v2: str, user_id: str | None = None,
+                    dry_run: bool = False) -> list[str]:
+    """Soft-delete one or more thread records using the UI's captured payload shape."""
+    seen: set[str] = set()
+    ordered_ids = [
+        thread_id for thread_id in thread_ids
+        if thread_id and not (thread_id in seen or seen.add(thread_id))
+    ]
+    if not ordered_ids:
+        return []
+
+    ops = [{
+        "pointer": {"table": "thread", "id": thread_id, "spaceId": space_id},
+        "path": [],
+        "command": "update",
+        "args": {
+            "alive": False,
+            "current_inference_id": None,
+            "current_inference_lease_expiration": None,
+        },
+    } for thread_id in ordered_ids]
+
+    payload = _tx(
+        space_id,
+        ops,
+        user_action="assistantChatHistoryItem.deleteInferenceChatTranscript",
+        unretryable_error_behavior="continue",
+    )
+    _post("saveTransactionsFanout", payload, token_v2, user_id, dry_run)
+    return ordered_ids
+
+
+def archive_workflow_threads(workflow_id: str, space_id: str,
+                             token_v2: str, user_id: str | None = None,
+                             limit: int = 100) -> dict:
+    """Discover and archive all currently listed threads for a workflow."""
+    threads = list_workflow_threads(workflow_id, space_id, token_v2, user_id, limit=limit)
+    thread_ids = [thread["id"] for thread in threads if thread.get("id")]
+    archived_ids = archive_threads(thread_ids, space_id, token_v2, user_id)
+    return {
+        "count": len(archived_ids),
+        "threadIds": archived_ids,
+        "threads": threads,
+    }
+
+
 # ── Agent tools/modules ───────────────────────────────────────────────────────
 
 # Model codename → display name mapping (discovered from live data)
@@ -1139,17 +1269,52 @@ def publish_agent(workflow_id: str, space_id: str,
                   dry_run: bool = False) -> dict:
     """
     Publish a Notion AI Agent workflow.
-    Returns {workflowArtifactId, version} on success.
+    Returns {workflowArtifactId, version} on success,
+    or {"warning": ...} if publish failed with a tolerable error.
+
+    The Notion UI's save flow is: persist block edits via saveTransactionsFanout,
+    sync workflow state, attempt publishCustomAgentVersion, sync artifact state.
+    The UI tolerates incomplete_ancestor_path from publish and still reports
+    "Agent saved successfully." We mirror that behavior here.
 
     Endpoint discovered via browser network intercept (2026-03-03).
     No public documentation exists for this endpoint.
     """
     payload = {"workflowId": workflow_id, "spaceId": space_id}
-    result = _post("publishCustomAgentVersion", payload, token_v2, user_id, dry_run)
 
-    if not dry_run and "workflowArtifactId" not in result:
-        raise RuntimeError(
-            f"Unexpected publish response (missing workflowArtifactId): {result}"
-        )
+    try:
+        result = _post("publishCustomAgentVersion", payload, token_v2, user_id, dry_run)
+    except RuntimeError as e:
+        err_str = str(e)
+        if "incomplete_ancestor_path" in err_str:
+            result = {
+                "warning": "incomplete_ancestor_path",
+                "detail": (
+                    "publishCustomAgentVersion returned incomplete_ancestor_path. "
+                    "This also occurs in the Notion UI — block edits were saved "
+                    "successfully but the publish/snapshot step failed. The agent "
+                    "instructions are updated; the published artifact may be stale."
+                ),
+            }
+        else:
+            raise
+
+    if dry_run:
+        return result
+
+    try:
+        cleanup = archive_workflow_threads(workflow_id, space_id, token_v2, user_id)
+        result["archivedThreadCount"] = cleanup["count"]
+        result["archivedThreadIds"] = cleanup["threadIds"]
+    except Exception as e:
+        result["threadCleanupWarning"] = str(e)
+
+    if "warning" in result:
+        return result
+
+    if "workflowArtifactId" not in result:
+        detail = f"Missing workflowArtifactId: {result}"
+        result.setdefault("warning", "unexpected_response")
+        result.setdefault("detail", detail)
 
     return result

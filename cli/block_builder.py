@@ -313,6 +313,7 @@ def markdown_to_ir(md: str) -> list[IRBlock]:
 
         stripped = line.strip()
         if not stripped:
+            # Skip blank lines in markdown. Notion blocks have inherent vertical spacing.
             i += 1
             continue
 

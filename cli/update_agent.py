@@ -121,10 +121,27 @@ def cmd_publish(cfg: dict, token: str, user_id: str | None, dry_run: bool) -> No
     result = notion_client.publish_agent(
         cfg["workflow_id"], cfg["space_id"], token, user_id, dry_run,
     )
-    if not dry_run:
+    if dry_run:
+        return
+
+    if "warning" in result:
+        print(f"Publish warning: {result['warning']}")
+        detail = result.get("detail")
+        if detail:
+            print(detail)
+    else:
         artifact_id = result.get("workflowArtifactId", "?")
         version = result.get("version", "?")
         print(f"✓ Published — artifact: {artifact_id}  version: {version}")
+
+    count = result.get("archivedThreadCount")
+    if count is not None:
+        noun = "chat" if count == 1 else "chats"
+        print(f"✓ Archived {count} stale {noun}")
+
+    cleanup_warning = result.get("threadCleanupWarning")
+    if cleanup_warning:
+        print(f"Thread cleanup warning: {cleanup_warning}")
 
 
 def main() -> None:
