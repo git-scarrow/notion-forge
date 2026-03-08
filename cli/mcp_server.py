@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import threading
+import uuid
 import time
 
 # Allow running from project root or cli/ directory
@@ -26,6 +27,7 @@ from mcp.server.fastmcp import FastMCP
 
 import block_builder
 import cookie_extract
+import notion_api
 import notion_client
 
 AGENTS_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents.yaml")
@@ -33,9 +35,10 @@ AGENTS_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents.y
 mcp = FastMCP(
     "notion-agents",
     instructions=(
-        "Tools for managing Notion AI Agent instructions. "
-        "You can list, dump, update, publish, discover, register, and remove agents. "
-        "Auth is automatic via Firefox session cookies (token_v2)."
+        "PROGRAMMATIC EDITS PAUSED: All automated modifications to Notion Agent "
+        "configurations are strictly paused for maintenance. Do NOT use create, "
+        "update, or set_config tools until further notice. Read-only discovery "
+        "tools remain active. Auth is automatic via Firefox session cookies (token_v2)."
     ),
 )
 
@@ -812,6 +815,145 @@ def get_db_automations(db: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _get_notion_api_client() -> notion_api.NotionAPIClient:
+    """Get a public Notion API client using NOTION_TOKEN."""
+    token = os.environ.get("NOTION_TOKEN")
+    if not token:
+        raise RuntimeError(
+            "NOTION_TOKEN environment variable required for database queries. "
+            "Set it to a Notion integration token."
+        )
+    return notion_api.NotionAPIClient(token)
+
+
+def _format_property_value(prop: dict) -> str:
+    """Extract a readable string from a Notion page property value."""
+    ptype = prop.get("type", "")
+    if ptype == "title":
+        return "".join(t.get("plain_text", "") for t in prop.get("title", []))
+    if ptype == "rich_text":
+        return "".join(t.get("plain_text", "") for t in prop.get("rich_text", []))
+    if ptype == "select":
+        sel = prop.get("select")
+        return sel["name"] if sel else ""
+    if ptype == "multi_select":
+        return ", ".join(o["name"] for o in prop.get("multi_select", []))
+    if ptype == "status":
+        st = prop.get("status")
+        return st["name"] if st else ""
+    if ptype == "checkbox":
+        return "Yes" if prop.get("checkbox") else "No"
+    if ptype == "number":
+        val = prop.get("number")
+        return str(val) if val is not None else ""
+    if ptype == "url":
+        return prop.get("url") or ""
+    if ptype == "date":
+        d = prop.get("date")
+        if not d:
+            return ""
+        start = d.get("start", "")
+        end = d.get("end")
+        return f"{start} → {end}" if end else start
+    if ptype == "relation":
+        return f"({len(prop.get('relation', []))} linked)"
+    if ptype in ("created_time", "last_edited_time"):
+        return prop.get(ptype, "")
+    if ptype in ("created_by", "last_edited_by"):
+        person = prop.get(ptype, {})
+        return person.get("name", person.get("id", ""))
+    if ptype == "formula":
+        f = prop.get("formula", {})
+        return str(f.get(f.get("type", ""), ""))
+    if ptype == "rollup":
+        r = prop.get("rollup", {})
+        return str(r.get(r.get("type", ""), ""))
+    return str(prop)
+
+
+@mcp.tool()
+def query_database(
+    database_id: str,
+    filter: str = "",
+    sorts: str = "",
+    properties: str = "",
+    limit: int = 50,
+) -> str:
+    """
+    Query a Notion database by ID and return rows as a formatted table.
+
+    Bypasses the Notion plugin's broken notion-query-database-view tool
+    by calling the public API directly with a database UUID.
+
+    database_id: The database page UUID (dashed or dashless), NOT the collection://
+        data source ID. Example: "389645af-0e4f-479e-a910-79b169a99462" for Lab Projects.
+    filter: Optional JSON string with a Notion API filter object. Example:
+        '{"property": "Status", "select": {"equals": "Active"}}'
+    sorts: Optional JSON string with a Notion API sorts array. Example:
+        '[{"property": "Last Activity", "direction": "descending"}]'
+    properties: Comma-separated property names to display. If empty, shows all.
+        Example: "Project Name,Status,Category,Last Activity"
+    limit: Max rows to return (default 50, max 100).
+    """
+    client = _get_notion_api_client()
+    db_id = _to_dashed_uuid(database_id)
+
+    filter_obj = json.loads(filter) if filter else None
+    sorts_obj = json.loads(sorts) if sorts else None
+
+    # Build query payload
+    payload: dict = {"page_size": min(limit, 100)}
+    if filter_obj:
+        payload["filter"] = filter_obj
+    if sorts_obj:
+        payload["sorts"] = sorts_obj
+
+    result = client._request("POST", f"databases/{db_id}/query", payload)
+    pages = result.get("results", [])
+
+    if not pages:
+        return "No results."
+
+    # Determine which properties to show
+    show_props = [p.strip() for p in properties.split(",") if p.strip()] if properties else None
+
+    # Build table rows
+    rows = []
+    for page in pages:
+        props = page.get("properties", {})
+        row = {}
+        for name, val in props.items():
+            if show_props and name not in show_props:
+                continue
+            row[name] = _format_property_value(val)
+        rows.append(row)
+
+    if not rows:
+        return f"{len(pages)} pages returned but no displayable properties."
+
+    # Get column order: use show_props if specified, else sorted keys from first row
+    if show_props:
+        columns = [c for c in show_props if c in rows[0]]
+    else:
+        # Put title-like columns first
+        all_cols = list(rows[0].keys())
+        columns = sorted(all_cols)
+
+    # Format as markdown table
+    header = "| " + " | ".join(columns) + " |"
+    separator = "| " + " | ".join("---" for _ in columns) + " |"
+    lines = [header, separator]
+    for row in rows:
+        cells = [row.get(c, "").replace("|", "\\|").replace("\n", " ")[:100] for c in columns]
+        lines.append("| " + " | ".join(cells) + " |")
+
+    total_note = ""
+    if result.get("has_more"):
+        total_note = f"\n\n_Showing {len(pages)} of more results. Use filter or increase limit._"
+
+    return "\n".join(lines) + total_note
+
+
 @mcp.tool()
 @auth_retry
 def get_agent_tools(agent_name: str) -> str:
@@ -1032,8 +1174,189 @@ def set_agent_model(
     return msg
 
 
+@mcp.tool()
+@auth_retry
+def create_agent(
+    name: str,
+    icon: str | None = None,
+    space_id: str | None = None,
+    register: bool = True,
+) -> str:
+    """
+    Create a new Notion AI Agent from scratch.
+
+    name: Display name for the agent.
+    icon: Optional URL to an icon image.
+    space_id: Target Notion space ID. If omitted, auto-discovers if the user has only one space.
+    register: If True, adds the agent to agents.yaml automatically.
+    """
+    token, user_id = _get_auth()
+
+    if not space_id:
+        spaces = notion_client.get_user_spaces(token)
+        if len(spaces) == 1:
+            space_id = spaces[0]["id"]
+        elif not spaces:
+            raise ValueError("No Notion spaces found for this user.")
+        else:
+            space_list = ", ".join(f"{s['name']} ({s['id']})" for s in spaces)
+            raise ValueError(f"Multiple spaces found. Provide space_id. Available: {space_list}")
+
+    result = notion_client.create_agent(space_id, name, icon, token, user_id)
+    wf_id = result["workflow_id"]
+    block_id = result["block_id"]
+
+    # Always add to sidebar
+    notion_client.add_agent_to_sidebar(space_id, wf_id, token, user_id)
+
+    # Initial publish (v1)
+    notion_client.publish_agent(wf_id, space_id, token, user_id, archive_existing=False)
+
+    msg = f"Created agent '{name}' (workflow: {wf_id}, instructions: {block_id})."
+
+    if register:
+        key = _name_to_key(name)
+        registry = _load_registry()
+        registry[key] = {
+            "workflow_id": wf_id,
+            "space_id": space_id,
+            "block_id": block_id,
+            "label": name,
+        }
+        _save_registry(registry)
+        msg += f" Registered as '{key}' in agents.yaml."
+
+    return msg
+
+
+@mcp.tool()
+@auth_retry
+def get_agent_config_raw(agent_name: str) -> str:
+    """
+    Fetch the raw workflow record for an agent.
+    Useful for cloning tool/module configurations.
+    """
+    cfg = _get_agent_config(agent_name)
+    token, user_id = _get_auth()
+    wf = notion_client.get_workflow_record(cfg["workflow_id"], token, user_id)
+    return json.dumps(wf, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+@auth_retry
+def set_agent_modules(
+    agent_name: str,
+    modules_json: str,
+    publish: bool = True,
+) -> str:
+    """
+    Update an agent's modules (tools and permissions) in bulk.
+
+    agent_name: Registered agent name.
+    modules_json: JSON string containing the modules array (from get_agent_config_raw).
+    publish: Whether to publish immediately.
+    """
+    modules = json.loads(modules_json)
+    if not isinstance(modules, list):
+        raise ValueError("modules_json must be a list of modules.")
+
+    cfg = _get_agent_config(agent_name)
+    token, user_id = _get_auth()
+
+    notion_client.update_agent_modules(
+        cfg["workflow_id"], cfg["space_id"], modules, token, user_id,
+    )
+
+    msg = f"Bulk-updated modules for {agent_name}."
+    if publish:
+        result = notion_client.publish_agent(
+            cfg["workflow_id"], cfg["space_id"], token, user_id,
+        )
+        msg += f" {_build_publish_message(agent_name, result)}"
+    return msg
+
+
+@mcp.tool()
+@auth_retry
+def set_agent_config_raw(
+    agent_name: str,
+    config_json: str,
+    publish: bool = True,
+    freshen_triggers: bool = True,
+) -> str:
+    """
+    Update an agent's core configuration (modules, triggers, metadata) in bulk.
+
+    agent_name: Registered agent name.
+    config_json: JSON string containing the 'data' payload (from get_agent_config_raw).
+    publish: Whether to publish immediately.
+    freshen_triggers: If True (default), generate new random IDs for triggers.
+                      Highly recommended when cloning from another agent to avoid conflicts.
+    """
+    new_data = json.loads(config_json)
+    if not isinstance(new_data, dict):
+        raise ValueError("config_json must be a dictionary.")
+
+    # If the user passed the full workflow record, extract the .data part
+    if "data" in new_data and "id" in new_data:
+        new_data = new_data["data"]
+
+    if freshen_triggers and "triggers" in new_data:
+        for t in new_data["triggers"]:
+            t["id"] = str(uuid.uuid4())
+            if t.get("state", {}).get("type") == "recurrence":
+                t["state"]["scheduleId"] = str(uuid.uuid4())
+
+    cfg = _get_agent_config(agent_name)
+    token, user_id = _get_auth()
+
+    ops = [{
+        "pointer": {"table": "workflow", "id": cfg["workflow_id"], "spaceId": cfg["space_id"]},
+        "path": ["data"],
+        "command": "update",
+        "args": new_data
+    }]
+    notion_client.send_ops(cfg["space_id"], ops, token, user_id)
+
+    msg = f"Bulk-updated configuration for {agent_name}."
+    if publish:
+        result = notion_client.publish_agent(
+            cfg["workflow_id"], cfg["space_id"], token, user_id,
+        )
+        msg += f" {_build_publish_message(agent_name, result)}"
+    return msg
+
+
+@mcp.tool()
+@auth_retry
+def grant_resource_access(
+    agent_name: str,
+    block_id: str,
+    role: str = "editor",
+) -> str:
+    """
+    Authoritatively grant an agent access to a Notion page or database.
+    Performs the full handshake required for backend provisioning.
+
+    agent_name: Registered agent name.
+    block_id: The UUID of the page or database.
+    role: 'editor' (read/write) or 'reader' (read-only).
+    """
+    cfg = _get_agent_config(agent_name)
+    token, user_id = _get_auth()
+
+    result = notion_client.grant_agent_resource_access(
+        cfg["workflow_id"], cfg["space_id"], block_id, role,
+        token, user_id,
+    )
+
+    msg = f"Granted {role} access to {block_id} for {agent_name}."
+    msg += f" {_build_publish_message(agent_name, result)}"
+    return msg
+
+
 def main():
-    mcp.run()
+ mcp.run()
 
 
 if __name__ == "__main__":

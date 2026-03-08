@@ -89,6 +89,29 @@ def _post(endpoint: str, payload: dict, token_v2: str, user_id: str | None = Non
 
 # ── Discover ──────────────────────────────────────────────────────────────────
 
+def get_user_spaces(token_v2: str) -> list[dict]:
+    """
+    List all spaces (workspaces) the user belongs to.
+    Uses loadUserContent which is more reliable than getSpaces.
+    """
+    data = _post("loadUserContent", {}, token_v2)
+    
+    record_map = data.get("recordMap", {})
+    spaces_map = record_map.get("space", {})
+    
+    spaces = []
+    for space_id, space_rec in spaces_map.items():
+        v = space_rec.get("value", {})
+        if not v.get("alive", True):
+            continue
+        spaces.append({
+            "id": space_id,
+            "name": v.get("name"),
+            "domain": v.get("domain"),
+        })
+    return sorted(spaces, key=lambda s: (s["name"] or "").lower())
+
+
 def get_all_workspace_agents(space_id: str, token_v2: str,
                               user_id: str | None = None) -> list[dict]:
     """
@@ -313,11 +336,12 @@ def _block_pointer(block_id: str, space_id: str) -> dict:
 
 def send_ops(space_id: str, ops: list[dict],
              token_v2: str, user_id: str | None = None,
-             dry_run: bool = False) -> None:
+             dry_run: bool = False,
+             user_action: str = "cli.update_agent") -> None:
     """Send a batch of operations in a single transaction."""
     if not ops:
         return
-    _post("saveTransactionsFanout", _tx(space_id, ops), token_v2, user_id, dry_run)
+    _post("saveTransactionsFanout", _tx(space_id, ops, user_action=user_action), token_v2, user_id, dry_run)
 
 
 def _record_value(entry: dict | None) -> dict:
@@ -992,6 +1016,8 @@ def list_workflow_threads(workflow_id: str, space_id: str,
             "spaceId": space_id,
             "limit": limit,
         }
+        if user_id:
+            payload["userId"] = user_id
         if cursor:
             payload["cursor"] = cursor
 
@@ -1257,7 +1283,93 @@ def update_agent_modules(workflow_id: str, space_id: str,
         "command": "set",
         "args": modules,
     }]
-    send_ops(space_id, ops, token_v2, user_id)
+    send_ops(space_id, ops, token_v2, user_id, user_action="WorkflowActions.saveModule")
+
+
+def grant_agent_resource_access(workflow_id: str, space_id: str,
+                                block_id: str, role: str,
+                                token_v2: str, user_id: str | None = None) -> dict:
+    """
+    Authoritatively grant an agent access to a specific Notion resource.
+    Matches the UI's 'NotionModulePermissions.restoreResourceAccess' flow:
+      1. Update the 'modules' array on the workflow (UI intent).
+      2. Send 'setPermissionItem' on the target block for both Runtime and Draft bots.
+      3. Publish the agent to synchronize.
+    """
+    # 1. Fetch current state to get bots and update modules array
+    wf = get_workflow_record(workflow_id, token_v2, user_id)
+    modules = wf.get("data", {}).get("modules", [])
+    
+    runtime_bot = wf.get("data", {}).get("runtime_actor_pointer", {}).get("id")
+    draft_bot = wf.get("data", {}).get("draft_runtime_actor_pointer", {}).get("id")
+    
+    if not runtime_bot:
+        raise ValueError(f"Agent {workflow_id} has no runtime_actor_pointer (bot). Publish it first.")
+
+    # Find the Notion module
+    notion_mod = next((m for m in modules if m["type"] == "notion"), None)
+    if not notion_mod:
+        notion_mod = {
+            "id": str(uuid.uuid4()),
+            "name": "Notion",
+            "type": "notion",
+            "version": "1.0.0",
+            "permissions": []
+        }
+        modules.append(notion_mod)
+
+    # Update/Append permission intent in modules array
+    perms = notion_mod.get("permissions", [])
+    found = False
+    
+    # UI actions: 'read_and_write' or 'reader'
+    api_actions = ["read_and_write"] if role in ["editor", "read_and_write"] else ["reader"]
+    
+    for p in perms:
+        if p.get("identifier", {}).get("blockId") == block_id:
+            p["actions"] = api_actions
+            found = True
+            break
+            
+    if not found:
+        perms.append({
+            "type": "notion",
+            "moduleType": "notion",
+            "actions": api_actions,
+            "identifier": {
+                "type": "pageOrCollectionViewBlock",
+                "blockId": block_id
+            }
+        })
+    
+    notion_mod["permissions"] = perms
+
+    # 2. Prepare the real authorization operations (setPermissionItem)
+    # The role object for 'editor' level access
+    role_obj = {"read_content": True, "read_comment": True}
+    if "read_and_write" in api_actions:
+        role_obj.update({"insert_content": True, "update_content": True, "insert_comment": True})
+
+    auth_ops = []
+    for bot_id in filter(None, [runtime_bot, draft_bot]):
+        auth_ops.append({
+            "pointer": {"table": "block", "id": block_id, "spaceId": space_id},
+            "command": "setPermissionItem",
+            "path": ["permissions"],
+            "args": {
+                "type": "bot_permission",
+                "bot_id": bot_id,
+                "role": role_obj,
+                "access_revoked": False
+            }
+        })
+
+    # 3. Execute all: Update modules (Intent) + Grant (Authorization)
+    update_agent_modules(workflow_id, space_id, modules, token_v2, user_id)
+    send_ops(space_id, auth_ops, token_v2, user_id, user_action="NotionModulePermissions.restoreResourceAccess")
+
+    # 4. Final Publish Handshake
+    return publish_agent(workflow_id, space_id, token_v2, user_id)
 
 
 def update_agent_model(workflow_id: str, space_id: str,
@@ -1273,29 +1385,164 @@ def update_agent_model(workflow_id: str, space_id: str,
     send_ops(space_id, ops, token_v2, user_id)
 
 
+def create_agent(space_id: str, name: str, icon: str | None,
+                 token_v2: str, user_id: str) -> dict:
+    """
+    Create a new Notion AI Agent from scratch.
+
+    This performs Transaction 1:
+      - Create the 'workflow' record
+      - Create the 'page' block for instructions
+      - Create the initial 'text' block inside the instructions page
+      - Link them together
+
+    Returns {workflow_id, block_id} on success.
+    """
+    workflow_id = str(uuid.uuid4())
+    instruction_block_id = str(uuid.uuid4())
+    initial_text_block_id = str(uuid.uuid4())
+    now = int(time.time() * 1000)
+
+    # 1. Workflow record
+    wf_args = {
+        "id": workflow_id,
+        "version": 1,
+        "parent_id": space_id,
+        "parent_table": "space",
+        "space_id": space_id,
+        "data": {
+            "scripts": [],
+            "modules": [{
+                "id": str(uuid.uuid4()),
+                "type": "notion",
+                "name": "Notion",
+                "version": "1.0.0",
+                "permissions": []
+            }],
+            "triggers": [{
+                "id": str(uuid.uuid4()),
+                "moduleId": "", # filled later or left empty for default @mention
+                "enabled": True,
+                "state": {"type": "notion.agent.mentioned"}
+            }],
+            "name": name,
+            "icon": icon or "https://www.notion.so/images/customAgentAvatars/rock-blue.png",
+            "instructions": {
+                "table": "block",
+                "id": instruction_block_id,
+                "spaceId": space_id
+            }
+        },
+        "created_by_table": "notion_user",
+        "created_by_id": user_id,
+        "created_time": now,
+        "last_edited_by_table": "notion_user",
+        "last_edited_by_id": user_id,
+        "last_edited_time": now,
+        "alive": True,
+        "permissions": [{
+            "type": "user_permission",
+            "role": "editor",
+            "user_id": user_id
+        }]
+    }
+
+    # 2. Instruction block (page)
+    # Notion uses a complex crdt_data for initial empty title, but a simple set works
+    instr_args = {
+        "id": instruction_block_id,
+        "type": "page",
+        "properties": {"title": [["Instructions"]]},
+        "space_id": space_id,
+        "parent_id": workflow_id,
+        "parent_table": "workflow",
+        "alive": True,
+        "created_time": now,
+        "created_by_table": "notion_user",
+        "created_by_id": user_id,
+        "last_edited_time": now,
+        "last_edited_by_id": user_id,
+        "last_edited_by_table": "notion_user"
+    }
+
+    # 3. Initial text block
+    text_args = {
+        "id": initial_text_block_id,
+        "type": "text",
+        "properties": {"title": [["Get started..."]]},
+        "space_id": space_id,
+        "parent_id": instruction_block_id,
+        "parent_table": "block",
+        "alive": True,
+        "created_time": now,
+        "created_by_table": "notion_user",
+        "created_by_id": user_id,
+        "last_edited_time": now,
+        "last_edited_by_id": user_id,
+        "last_edited_by_table": "notion_user"
+    }
+
+    ops = [
+        {"pointer": {"table": "workflow", "id": workflow_id, "spaceId": space_id}, "command": "set", "path": [], "args": wf_args},
+        {"pointer": _block_pointer(instruction_block_id, space_id), "command": "set", "path": [], "args": instr_args},
+        {"pointer": _block_pointer(initial_text_block_id, space_id), "command": "set", "path": [], "args": text_args},
+        {"pointer": _block_pointer(instruction_block_id, space_id), "command": "listAfter", "path": ["content"], "args": {"after": None, "id": initial_text_block_id}}
+    ]
+
+    send_ops(space_id, ops, token_v2, user_id, user_action="agentActions.createBlankAgent")
+
+    return {
+        "workflow_id": workflow_id,
+        "block_id": instruction_block_id
+    }
+
+
+def add_agent_to_sidebar(space_id: str, workflow_id: str,
+                         token_v2: str, user_id: str) -> None:
+    """
+    Append a workflow ID to the user's sidebar (space_view.settings.sidebar_workflow_ids).
+    """
+    # 1. Find space_view ID
+    data = _post("loadUserContent", {}, token_v2)
+    
+    space_view_id = None
+    for sv_id, sv_rec in data.get("recordMap", {}).get("space_view", {}).items():
+        if sv_rec.get("value", {}).get("space_id") == space_id:
+            space_view_id = sv_id
+            break
+
+    if not space_view_id:
+        raise RuntimeError(f"Could not find space_view for space {space_id}")
+
+    # 2. Add to sidebar
+    ops = [{
+        "pointer": {"table": "space_view", "id": space_view_id, "spaceId": space_id},
+        "path": ["settings", "sidebar_workflow_ids"],
+        "command": "listAfter",
+        "args": {"id": workflow_id}
+    }]
+    send_ops(space_id, ops, token_v2, user_id, user_action="sidebarWorkflowsActions.addSidebarWorkflow")
+
+
 # ── Publish ───────────────────────────────────────────────────────────────────
 
 def publish_agent(workflow_id: str, space_id: str,
                   token_v2: str, user_id: str | None = None,
-                  dry_run: bool = False) -> dict:
+                  dry_run: bool = False,
+                  archive_existing: bool = True) -> dict:
     """
     Publish a Notion AI Agent workflow.
-    Returns {workflowArtifactId, version} on success,
-    or {"warning": ...} if publish failed with a tolerable error.
+    Returns {workflowArtifactId, version} on success.
 
-    The Notion UI's save flow is: persist block edits via saveTransactionsFanout,
-    sync workflow state, attempt publishCustomAgentVersion, sync artifact state.
-    The UI tolerates incomplete_ancestor_path from publish and still reports
-    "Agent saved successfully." We mirror that behavior here.
-
-    Endpoint discovered via browser network intercept (2026-03-03).
-    No public documentation exists for this endpoint.
+    archive_existing: If True, clear out old chats (standard for instruction updates).
+                      If False, keep existing chats (used during initial creation).
     """
     payload = {"workflowId": workflow_id, "spaceId": space_id}
 
     try:
         result = _post("publishCustomAgentVersion", payload, token_v2, user_id, dry_run)
     except RuntimeError as e:
+        # ... (rest of error handling unchanged) ...
         err_str = str(e)
         if "incomplete_ancestor_path" in err_str:
             result = {
@@ -1313,12 +1560,13 @@ def publish_agent(workflow_id: str, space_id: str,
     if dry_run:
         return result
 
-    try:
-        cleanup = archive_workflow_threads(workflow_id, space_id, token_v2, user_id)
-        result["archivedThreadCount"] = cleanup["count"]
-        result["archivedThreadIds"] = cleanup["threadIds"]
-    except Exception as e:
-        result["threadCleanupWarning"] = str(e)
+    if archive_existing:
+        try:
+            cleanup = archive_workflow_threads(workflow_id, space_id, token_v2, user_id)
+            result["archivedThreadCount"] = cleanup["count"]
+            result["archivedThreadIds"] = cleanup["threadIds"]
+        except Exception as e:
+            result["threadCleanupWarning"] = str(e)
 
     if "warning" in result:
         return result

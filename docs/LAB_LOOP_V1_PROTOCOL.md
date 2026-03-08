@@ -13,7 +13,18 @@ Before an agent performs any primary task (Spec, Dispatch, or Synthesis), it mus
 1.  **Clear the Signal Bit** (`Checkbox = false`).
 2.  **Record the Timestamp** (`Consumed At = now()`).
 
-Both properties are written in a single API call via `NotionAPIClient.atomic_consume()` in `cli/notion_api.py`. Status updates are the caller's responsibility and happen separately after consumption.
+Both properties are written in a single API call via `NotionAPIClient.atomic_consume()` in `cli/notion_api.py`. Status updates should be included in this same atomic call using the `extra_properties` parameter to ensure the state machine moves forward without race conditions.
+
+### Canonical Property Mapping
+| Property | Public Name | Internal ID |
+|---|---|---|
+| Dispatch Signal | `Dispatch Requested` | `:Al]` |
+| Dispatch TS | `Dispatch Requested Consumed At` | `DRCA` |
+| Librarian Signal | `Librarian Request` | `ZO=b` |
+| Librarian TS | `Librarian Request Consumed At` | `LRCA` |
+| Return TS | `Return Consumed At` | `{Grj` |
+| Strategy | `Prompt Notes` | `FLW<` |
+| Synthesis TS | `Synthesis Completed At` | `|y=i` |
 
 ## 3. The Model Checker (Lab Auditor)
 The `cli/lab_auditor.py` script is a batch invariant checker. It queries the Notion API to verify that the live workspace hasn't violated the formal model's invariants.
@@ -43,7 +54,8 @@ NOTION_TOKEN=<token> python3 cli/lab_auditor.py
 |---|---|---|
 | Lab Dispatcher | `Dispatch Requested` | checkbox = true |
 | Prompt Architect | `Dispatch Via` | enum matches any value |
-| Librarian | `Librarian Request` | checkbox = true |
+| Lab Librarian | `Librarian Request` | checkbox = true |
+| Lab Research Designer | `Synthesis Completed At` | is_not_empty |
 | Return Protocol Agent | `Status` | = Done |
 
 ### Trigger Chain: Dispatch
@@ -55,7 +67,7 @@ NOTION_TOKEN=<token> python3 cli/lab_auditor.py
 ### Trigger Chain: Return
 1. `github_return.py` sets Work Item Status = Done, LR = true, Run Date, Return Consumed At.
 2. Status = Done triggers the **Return Protocol Agent**, which clears `Active GitHub Issue` on the parent Lab Project.
-3. LR = true triggers the **Librarian**, which synthesizes findings.
+3. LR = true triggers the **Lab Librarian**, which synthesizes findings.
 
 ## 5. Domain Boundaries (Lab vs. Factory)
 *   **The Lab (Notion)**: The domain of **Epistemic Uncertainty**. Holds Work Items, Specs, and Findings.

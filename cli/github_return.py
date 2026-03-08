@@ -36,17 +36,25 @@ def find_work_item_by_url(client: notion_api.NotionAPIClient, url: str) -> dict[
     return results[0] if results else None
 
 def perform_return(client: notion_api.NotionAPIClient, page_id: str, summary: str = ""):
-    """Update Work Item status and trigger synthesis."""
+    """Update Work Item status and signal the Intake Clerk."""
     # Properties to update
     properties = {
-        "Status": {"status": {"name": "Done"}},
-        "Librarian Request": {"checkbox": True},
+        "Status": {"status": {"name": "Awaiting Intake"}}, # New phase-only status
+        "Outcome": {"rich_text": [{"text": {"content": summary}}]} if summary else {},
         "Run Date": {"date": {"start": notion_api.now_iso()}},
         "Return Consumed At": {"date": {"start": notion_api.now_iso()}}
     }
     
-    print(f"Updating Work Item {page_id} to 'Done' and triggering Librarian.")
-    client.update_page(page_id, properties=properties)
+    print(f"Updating Work Item {page_id} to 'Awaiting Intake'. Awaiting Intake Clerk.")
+    try:
+        client.update_page(page_id, properties=properties)
+    except Exception as e:
+        if "Awaiting Intake" in str(e):
+            print("Fallback: 'Awaiting Intake' status missing. Using legacy 'Done'.")
+            properties["Status"] = {"status": {"name": "Done"}}
+            client.update_page(page_id, properties=properties)
+        else:
+            raise e
     
     if summary:
         client.append_block_children(page_id, [

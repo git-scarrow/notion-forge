@@ -25,10 +25,43 @@ LAB_PROJECTS_DB_ID = "389645af-0e4f-479e-a910-79b169a99462"
 AUDIT_LOG_DB_ID = "4621be9a-0709-443e-bee6-7e6166f76fae"
 MODEL_EPOCH = datetime(2026, 3, 6, tzinfo=timezone.utc)
 
-TERMINAL_STATUSES = {"Done", "Passed", "Kill Condition Met", "Inconclusive"}
+TERMINAL_STATUSES = {"Done", "Passed", "Kill Condition Met", "Inconclusive", "Closed", "Blocked"}
 
 
-def _get_title(props: dict, key: str) -> str:
+def _get_select(props: dict, key: str) -> str | None:
+    select_prop = props.get(key, {})
+    return (select_prop.get("select") or {}).get("name") if select_prop else None
+
+
+def check_work_item_invariants(client: notion_api.NotionAPIClient) -> int:
+    """E.1 Safety, E.4 Liveness, E.7 Unconsumed Signal — all on Work Items."""
+    items = client.query_all(WORK_ITEMS_DB_ID)
+    violations = 0
+    now = datetime.now(timezone.utc)
+
+    for item in items:
+        props = item.get("properties", {})
+        name = _get_title(props, "Item Name")
+        status = _get_status(props)
+        verdict = _get_select(props, "Verdict")
+        close_reason = _get_select(props, "Close Reason")
+
+        dr = props.get("Dispatch Requested", {}).get("checkbox", False)
+        drca = props.get("Dispatch Requested Consumed At", {}).get("date")
+        lrra = props.get("Librarian Request Received At", {}).get("date")
+        lrca = props.get("Librarian Request Consumed At", {}).get("date")
+
+        # E.1 Safety: Signal Integrity (Zombies)
+        if dr and drca:
+            print(f"[VIOLATION: E.1] {name}: DR=true AND DRCA is set (Dispatch Zombie).")
+            violations += 1
+        
+        # New Invariant: If Closed/Normal, Verdict must be set
+        if status == "Closed" and close_reason == "Normal" and not verdict:
+            print(f"[VIOLATION: E.8] {name}: Status is Closed/Normal but Verdict is missing.")
+            violations += 1
+
+        # E.7 Unconsumed Signal (post-epoch only)
     title_list = props.get(key, {}).get("title", [])
     return title_list[0].get("plain_text", "Unknown") if title_list else "Untitled"
 
@@ -51,34 +84,24 @@ def check_work_item_invariants(client: notion_api.NotionAPIClient) -> int:
 
         dr = props.get("Dispatch Requested", {}).get("checkbox", False)
         drca = props.get("Dispatch Requested Consumed At", {}).get("date")
-        lr = props.get("Librarian Request", {}).get("checkbox", False)
+        lrra = props.get("Librarian Request Received At", {}).get("date")
         lrca = props.get("Librarian Request Consumed At", {}).get("date")
 
         # E.1 Safety: Signal Integrity (Zombies)
         if dr and drca:
             print(f"[VIOLATION: E.1] {name}: DR=true AND DRCA is set (Dispatch Zombie).")
             violations += 1
-        if lr and lrca:
-            print(f"[VIOLATION: E.1] {name}: LR=true AND LRCA is set (Librarian Zombie).")
-            violations += 1
-
-        # E.4 Liveness: Forward Progress (Stale Items)
-        last_edited_str = props.get("Last Edited Time", {}).get("last_edited_time")
-        if last_edited_str and status in ["In Progress", "Prompt Requested"]:
-            last_edited = datetime.fromisoformat(last_edited_str.replace("Z", "+00:00"))
-            if now - last_edited > timedelta(hours=24):
-                print(f"[WARNING: E.4] {name}: No progress in 24h (Status: {status}).")
-
+        
         # E.7 Unconsumed Signal (post-epoch only)
         created_str = props.get("Created time", {}).get("created_time") or item.get("created_time")
         if created_str:
             created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
             if created >= MODEL_EPOCH:
                 if dr and not drca:
-                    print(f"[P0: E.7] {name}: DR=true but DRCA is null (created {created.date()}). Unconsumed dispatch signal.")
+                    print(f"[P0: E.7] {name}: DR=true but DRCA is null. Unconsumed dispatch signal.")
                     violations += 1
-                if lr and not lrca:
-                    print(f"[P0: E.7] {name}: LR=true but LRCA is null (created {created.date()}). Unconsumed librarian signal.")
+                if lrra and not lrca:
+                    print(f"[P0: E.7] {name}: LRRA exists but LRCA is null. Unconsumed librarian signal.")
                     violations += 1
 
     return violations

@@ -59,22 +59,22 @@ def get_auth() -> tuple[str, str | None]:
     """Return (token_v2, user_id). Exits on failure."""
     try:
         token = cookie_extract.get_token_v2()
+        user_id = cookie_extract.get_user_id()
     except (FileNotFoundError, ValueError) as e:
         print(f"Auth error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    user_id = cookie_extract.get_user_id()
     return token, user_id
 
 
 def cmd_dump(cfg: dict, token: str, user_id: str | None) -> None:
     """Print current agent instructions as Markdown."""
-    print(f"Fetching instructions block {cfg['block_id']}...")
+    print(f"Fetching instructions block {cfg['block_id']}...", file=sys.stderr)
     data = notion_client.get_block_tree(cfg["block_id"], cfg["space_id"], token, user_id)
     blocks_map = data.get("recordMap", {}).get("block", {})
 
     if not blocks_map:
-        print("(No content found — block may be empty or inaccessible)")
+        print("(No content found — block may be empty or inaccessible)", file=sys.stderr)
         return
 
     md = block_builder.blocks_to_markdown(blocks_map, cfg["block_id"])
@@ -98,12 +98,12 @@ def cmd_update(cfg: dict, instructions_file: str,
               file=sys.stderr)
         sys.exit(1)
 
-    print(f"Parsed {len(new_blocks)} block(s) from {instructions_file}")
+    print(f"Parsed {len(new_blocks)} block(s) from {instructions_file}", file=sys.stderr)
 
     if dry_run:
-        print("\n[DRY RUN] Would replace block content and publish. Payload preview:\n")
+        print("\n[DRY RUN] Would replace block content and publish. Payload preview:\n", file=sys.stderr)
 
-    print(f"Replacing content of block {cfg['block_id']}...")
+    print(f"Replacing content of block {cfg['block_id']}...", file=sys.stderr)
     notion_client.replace_block_content(
         cfg["block_id"], cfg["space_id"], new_blocks,
         token, user_id, dry_run,
@@ -112,12 +112,12 @@ def cmd_update(cfg: dict, instructions_file: str,
     if publish:
         cmd_publish(cfg, token, user_id, dry_run)
     else:
-        print("Content updated. Skipping publish (use --publish-only to deploy).")
+        print("Content updated. Skipping publish (use --publish-only to deploy).", file=sys.stderr)
 
 
 def cmd_publish(cfg: dict, token: str, user_id: str | None, dry_run: bool) -> None:
     """Publish the agent workflow."""
-    print(f"Publishing agent (workflow {cfg['workflow_id']})...")
+    print(f"Publishing agent (workflow {cfg['workflow_id']})...", file=sys.stderr)
     result = notion_client.publish_agent(
         cfg["workflow_id"], cfg["space_id"], token, user_id, dry_run,
     )
@@ -125,23 +125,23 @@ def cmd_publish(cfg: dict, token: str, user_id: str | None, dry_run: bool) -> No
         return
 
     if "warning" in result:
-        print(f"Publish warning: {result['warning']}")
+        print(f"Publish warning: {result['warning']}", file=sys.stderr)
         detail = result.get("detail")
         if detail:
-            print(detail)
+            print(detail, file=sys.stderr)
     else:
         artifact_id = result.get("workflowArtifactId", "?")
         version = result.get("version", "?")
-        print(f"✓ Published — artifact: {artifact_id}  version: {version}")
+        print(f"✓ Published — artifact: {artifact_id}  version: {version}", file=sys.stderr)
 
     count = result.get("archivedThreadCount")
     if count is not None:
         noun = "chat" if count == 1 else "chats"
-        print(f"✓ Archived {count} stale {noun}")
+        print(f"✓ Archived {count} stale {noun}", file=sys.stderr)
 
     cleanup_warning = result.get("threadCleanupWarning")
     if cleanup_warning:
-        print(f"Thread cleanup warning: {cleanup_warning}")
+        print(f"Thread cleanup warning: {cleanup_warning}", file=sys.stderr)
 
 
 def main() -> None:
@@ -181,7 +181,7 @@ Examples:
     cfg = load_agent_config(args.agent)
     token, user_id = get_auth()
 
-    print(f"Agent: {args.agent}  |  Space: {cfg['space_id'][:8]}...")
+    print(f"Agent: {args.agent}  |  Space: {cfg['space_id'][:8]}...", file=sys.stderr)
 
     if args.dump:
         cmd_dump(cfg, token, user_id)
