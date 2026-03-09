@@ -79,14 +79,27 @@ NOTION_TOKEN=<token> python3 cli/lab_auditor.py
 | Work Item | `GitHub Issue URL` | Permanent reference to the Factory issue |
 | Lab Project | `Active GitHub Issue` | Lock — set on handoff, cleared by Return Protocol Agent |
 
-## 6. API Configuration
+## 6. API Configuration & ID Duality
 
-**Canonical Database IDs:**
-*   **Work Items DB**: `daeb64d4-e5a8-4a7b-b0dc-7555cbc3def6`
-*   **Lab Audit Log**: `4621be9a-0709-443e-bee6-7e6166f76fae`
-*   **Lab Projects**: `389645af-0e4f-479e-a910-79b169a99462`
+Notion databases have two distinct identities. Using the wrong ID for a tool **will** result in a 404 Object Not Found.
 
-The `cli/notion_api.py` client uses the official Notion Databases API (`/v1/databases/{id}/query`). The Notion MCP plugin uses `collection://` data source IDs for page creation.
+| ID Type | Example Name | Target Tooling |
+|---|---|---|
+| **notion_public_id** | `page_id` | Public API (`retrieve-a-database`, `query-database`, `update-page-v2`) |
+| **notion_internal_id** | `collection_id` | Internal Tools (`triggers`, `query-data-source`, `view`) |
+
+**Canonical Resource IDs:**
+*   **Work Items DB**:
+    *   Public ID: `daeb64d4-e5a8-4a7b-b0dc-7555cbc3def6`
+    *   Internal ID: `94e7ae5f-19c8-4008-b9cd-66afc18ce087`
+*   **Lab Audit Log**:
+    *   Public ID: `4621be9a-0709-443e-bee6-7e6166f76fae`
+    *   Internal ID: `fe40db65-077f-45d1-85a1-1d1763b63239`
+*   **Lab Projects**:
+    *   Public ID: `389645af-0e4f-479e-a910-79b169a99462`
+    *   Internal ID: `831b0f9d-842f-4c7f-8651-5a5e49afb160`
+
+The `cli/notion_api.py` client uses the official Notion Databases API and requires **Public IDs**. The Notion MCP plugin uses internal IDs (often formatted as `collection://{id}`) for page creation and triggers.
 
 ## 7. Troubleshooting
 *   **401 Unauthorized**: The `NOTION_TOKEN` environment variable is missing or invalid.

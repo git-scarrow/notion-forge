@@ -30,7 +30,10 @@ except ImportError:
 import cookie_extract
 import notion_client
 import block_builder
+import config
 
+# Use config instance
+CFG = config.get_config()
 
 AGENTS_YAML = os.path.join(os.path.dirname(__file__), "agents.yaml")
 
@@ -46,7 +49,7 @@ def load_agent_config(name: str) -> dict:
         sys.exit(1)
 
     cfg = registry[name]
-    required = {"workflow_id", "space_id", "block_id"}
+    required = {"notion_internal_id", "space_id", "notion_public_id"}
     missing = required - set(cfg.keys())
     if missing:
         print(f"Error: agents.yaml entry for '{name}' is missing: {missing}", file=sys.stderr)
@@ -58,8 +61,9 @@ def load_agent_config(name: str) -> dict:
 def get_auth() -> tuple[str, str | None]:
     """Return (token_v2, user_id). Exits on failure."""
     try:
-        token = cookie_extract.get_token_v2()
-        user_id = cookie_extract.get_user_id()
+        # Internal operations REQUIRE the session cookie (token_v2).
+        # Integration tokens (ntn_...) will 401 on internal endpoints.
+        token, user_id = cookie_extract.get_auth()
     except (FileNotFoundError, ValueError) as e:
         print(f"Auth error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -69,15 +73,15 @@ def get_auth() -> tuple[str, str | None]:
 
 def cmd_dump(cfg: dict, token: str, user_id: str | None) -> None:
     """Print current agent instructions as Markdown."""
-    print(f"Fetching instructions block {cfg['block_id']}...", file=sys.stderr)
-    data = notion_client.get_block_tree(cfg["block_id"], cfg["space_id"], token, user_id)
+    print(f"Fetching instructions block {cfg['notion_public_id']}...", file=sys.stderr)
+    data = notion_client.get_block_tree(cfg["notion_public_id"], cfg["space_id"], token, user_id)
     blocks_map = data.get("recordMap", {}).get("block", {})
 
     if not blocks_map:
         print("(No content found — block may be empty or inaccessible)", file=sys.stderr)
         return
 
-    md = block_builder.blocks_to_markdown(blocks_map, cfg["block_id"])
+    md = block_builder.blocks_to_markdown(blocks_map, cfg["notion_public_id"])
     print(md or "(Empty instructions block)")
 
 
@@ -103,9 +107,9 @@ def cmd_update(cfg: dict, instructions_file: str,
     if dry_run:
         print("\n[DRY RUN] Would replace block content and publish. Payload preview:\n", file=sys.stderr)
 
-    print(f"Replacing content of block {cfg['block_id']}...", file=sys.stderr)
+    print(f"Replacing content of block {cfg['notion_public_id']}...", file=sys.stderr)
     notion_client.replace_block_content(
-        cfg["block_id"], cfg["space_id"], new_blocks,
+        cfg["notion_public_id"], cfg["space_id"], new_blocks,
         token, user_id, dry_run,
     )
 
@@ -117,9 +121,9 @@ def cmd_update(cfg: dict, instructions_file: str,
 
 def cmd_publish(cfg: dict, token: str, user_id: str | None, dry_run: bool) -> None:
     """Publish the agent workflow."""
-    print(f"Publishing agent (workflow {cfg['workflow_id']})...", file=sys.stderr)
+    print(f"Publishing agent (workflow {cfg['notion_internal_id']})...", file=sys.stderr)
     result = notion_client.publish_agent(
-        cfg["workflow_id"], cfg["space_id"], token, user_id, dry_run,
+        cfg["notion_internal_id"], cfg["space_id"], token, user_id, dry_run,
     )
     if dry_run:
         return

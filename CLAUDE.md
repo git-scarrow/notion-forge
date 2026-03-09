@@ -6,7 +6,21 @@ Firefox extension + Tampermonkey script + Python CLI + MCP server for capturing 
 
 - Python venv: `cli/.venv` — use this for all CLI/MCP work; system Python lacks `mcp` and `pyyaml`
 - Node: ES modules — use `node --input-type=module -e "import ..."` for inline scripts
-- Workspace space_id: `f04bc8a1-18df-42d1-ba9f-961c491cdc1b` (constant)
+
+## Configuration
+The project uses a centralized configuration pattern in `cli/config.py`. All hardcoded IDs are stored there as defaults and can be overridden via environment variables or a `.env` file in the project root.
+
+### Core Environment Variables
+- `NOTION_TOKEN`: Notion integration token (required for public API tools like `lab_auditor.py`).
+- `NOTION_SPACE_ID`: The target Notion Space UUID.
+- `WORK_ITEMS_DB_ID`: The Work Items database UUID.
+- `LAB_PROJECTS_DB_ID`: The Lab Projects database UUID.
+- `AUDIT_LOG_DB_ID`: The Lab Audit Log database UUID.
+
+### Tool-Specific Configuration
+- `LIBRARIAN_WORKFLOW_ID`: The Agent workflow ID for the Lab Librarian.
+- `LIBRARIAN_BOT_RUNTIME`: The Bot ID for the Librarian's runtime permission.
+- `LIBRARIAN_BOT_DRAFT`: The Bot ID for the Librarian's draft permission.
 
 ## Testing
 
@@ -28,6 +42,15 @@ cli/.venv/bin/python -c "import sys; sys.path.insert(0,'cli'); import notion_cli
 - Tools: `list_agents`, `list_workspace_agents`, `sync_registry`, `dump_agent`, `update_agent`, `publish_agent`, `discover_agent`, `register_agent`, `remove_agent`, `get_agent_tools`, `add_agent_mcp_server`, `remove_agent_mcp_server`, `set_agent_model`
 - `sync_registry` auto-populates `cli/agents.yaml` from the live workspace (additive-only, safe to re-run)
 - See `~/.agents/skills/notion-agent-mcp/SKILL.md` for full API reference
+
+## ID Duality & Tool Compatibility
+
+Notion databases have two distinct UUIDs. Using the wrong one will result in a 404.
+
+| ID Type | Example Name | Tooling |
+|---|---|---|
+| **notion_public_id** | `page_id` | Public API (`retrieve-a-database`, `query-database`, `update-page-v2`) |
+| **notion_internal_id** | `collection_id` | Internal Tools (`triggers`, `query-data-source`, `view`) |
 
 ## Key files
 

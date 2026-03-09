@@ -200,7 +200,7 @@ function selectedAgent() {
   const key = agentSelect.value;
   const cfg = agentCache[key];
   if (!cfg) throw new Error(`Unknown agent: ${key}`);
-  for (const field of ['workflow_id', 'space_id', 'block_id']) {
+  for (const field of ['notion_internal_id', 'space_id', 'notion_public_id']) {
     if (!cfg[field] || cfg[field] === '...') throw new Error(`Agent "${key}" has placeholder ${field} — fill in real IDs first.`);
   }
   return { key, cfg };
@@ -237,13 +237,13 @@ async function discoverAgentFromTab(tabId) {
         // The instruction block is the first content block of the workflow
         const instructions = wf.data?.instructions;
         const blockId = typeof instructions === 'string' ? instructions
-          : instructions?.block_id || instructions?.id || instructions?.[0];
+          : instructions?.notion_public_id || instructions?.id || instructions?.[0];
         if (!blockId) return { error: 'instructions field: ' + JSON.stringify(instructions).slice(0, 300) };
         return {
           label: wf.data?.name || wf.name || wf.title || 'Unknown Agent',
-          workflow_id: workflowId,
+          notion_internal_id: workflowId,
           space_id: wf.space_id,
-          block_id: blockId,
+          notion_public_id: blockId,
         };
       });
     },
@@ -398,9 +398,9 @@ async function checkInFlightOp() {
 $("#btn-dump").addEventListener("click", () => {
   const { key, cfg } = selectedAgent();
   withAgentAction(`Dumping "${key}"…`,
-    { action: "dump", blockId: cfg.block_id, spaceId: cfg.space_id },
+    { action: "dump", blockId: cfg.notion_public_id, spaceId: cfg.space_id },
     (res) => {
-      const md = blocksToMarkdown(res.recordMap.block, cfg.block_id);
+      const md = blocksToMarkdown(res.recordMap.block, cfg.notion_public_id);
       $("#instructions").value = md || "(empty)";
       markClean();
       logLine("Loaded into editor.", "ok");
@@ -415,7 +415,7 @@ async function doUpdate() {
   if (!await inlineConfirm(`Replace "${key}" instructions and publish?`)) return;
   const newBlocks = markdownToBlocks(md);
   withAgentAction(`Updating "${key}" — ${newBlocks.length} blocks…`,
-    { action: "update", blockId: cfg.block_id, spaceId: cfg.space_id, workflowId: cfg.workflow_id, newBlocks },
+    { action: "update", blockId: cfg.notion_public_id, spaceId: cfg.space_id, workflowId: cfg.notion_internal_id, newBlocks },
     () => { logLine("Done.", "ok"); markClean(); }
   );
 }
@@ -426,7 +426,7 @@ $("#btn-publish-only").addEventListener("click", async () => {
   const { key, cfg } = selectedAgent();
   if (!await inlineConfirm(`Publish "${key}" now?`)) return;
   withAgentAction(`Publishing "${key}"…`,
-    { action: "publish", spaceId: cfg.space_id, workflowId: cfg.workflow_id },
+    { action: "publish", spaceId: cfg.space_id, workflowId: cfg.notion_internal_id },
     () => { logLine("Done.", "ok"); }
   );
 });
@@ -439,8 +439,8 @@ $("#btn-dry-run").addEventListener("click", () => {
   logClear();
   logLines([
     `[dry run] ${newBlocks.length} blocks → "${key}"`,
-    `blockId  ${cfg.block_id}`,
-    `workflow ${cfg.workflow_id}`,
+    `blockId  ${cfg.notion_public_id}`,
+    `workflow ${cfg.notion_internal_id}`,
     ``,
     ...newBlocks.slice(0, 12).map((b, i) => `[${i}] ${b.type}`),
     newBlocks.length > 12 ? `… +${newBlocks.length - 12} more` : "",

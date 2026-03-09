@@ -15,14 +15,12 @@ import argparse
 from typing import Any
 
 try:
-    from . import notion_api
+    from . import notion_api, config
 except ImportError:
-    import notion_api
+    import notion_api, config
 
-# Constants
-WORK_ITEMS_DB_ID = "daeb64d4-e5a8-4a7b-b0dc-7555cbc3def6"
-AUDIT_LOG_DB_ID = "4621be9a-0709-443e-bee6-7e6166f76fae"
-SPACE_ID = "f04bc8a1-18df-42d1-ba9f-961c491cdc1b"
+# Use config instance
+CFG = config.get_config()
 
 def find_work_item_by_url(client: notion_api.NotionAPIClient, url: str) -> dict[str, Any] | None:
     """Find a Work Item page where 'GitHub Issue URL' matches."""
@@ -32,7 +30,7 @@ def find_work_item_by_url(client: notion_api.NotionAPIClient, url: str) -> dict[
         "property": "GitHub Issue URL",
         "url": {"equals": url}
     }
-    results = client.query_all(WORK_ITEMS_DB_ID, filter_payload=filter_payload, page_size=1)
+    results = client.query_all(CFG.work_items_db_id, filter_payload=filter_payload, page_size=1)
     return results[0] if results else None
 
 def perform_return(client: notion_api.NotionAPIClient, page_id: str, summary: str = ""):
@@ -42,7 +40,8 @@ def perform_return(client: notion_api.NotionAPIClient, page_id: str, summary: st
         "Status": {"status": {"name": "Awaiting Intake"}}, # New phase-only status
         "Outcome": {"rich_text": [{"text": {"content": summary}}]} if summary else {},
         "Run Date": {"date": {"start": notion_api.now_iso()}},
-        "Return Consumed At": {"date": {"start": notion_api.now_iso()}}
+        "Return Received At": {"date": {"start": notion_api.now_iso()}},
+        "GitHub Issue URL": {"url": None},  # Clear so re-dispatch creates a fresh issue
     }
     
     print(f"Updating Work Item {page_id} to 'Awaiting Intake'. Awaiting Intake Clerk.")
@@ -66,7 +65,7 @@ def perform_return(client: notion_api.NotionAPIClient, page_id: str, summary: st
     try:
         ts = notion_api.now_iso()
         client.create_page(
-            parent={"database_id": AUDIT_LOG_DB_ID},
+            parent={"database_id": CFG.audit_log_db_id},
             properties={
                 "Transition": {"title": [{"text": {"content": "InProgress→Done"}}]},
                 "Work Item": {"relation": [{"id": page_id}]},
@@ -86,11 +85,9 @@ def main():
     parser.add_argument("--summary", help="Closing summary or description")
     args = parser.parse_args()
 
-    token = os.environ.get("NOTION_TOKEN")
-    if not token:
-        print("ERROR: NOTION_TOKEN environment variable required (Notion integration token)")
-        sys.exit(1)
+    token = CFG.notion_token
     client = notion_api.NotionAPIClient(token)
+
 
     work_item = find_work_item_by_url(client, args.url)
     

@@ -139,12 +139,12 @@ class NotionAPIClient:
             {"parent": parent, "properties": properties},
         )
 
-    def append_block_children(self, block_id: str, children: list[dict[str, Any]]) -> None:
+    def append_block_children(self, notion_public_id: str, children: list[dict[str, Any]]) -> None:
         for start in range(0, len(children), APPEND_BLOCK_LIMIT):
             chunk = children[start : start + APPEND_BLOCK_LIMIT]
             self._request(
                 "PATCH",
-                f"blocks/{block_id}/children",
+                f"blocks/{notion_public_id}/children",
                 {"children": chunk},
             )
 

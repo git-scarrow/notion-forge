@@ -4,9 +4,9 @@
 export const BUILTIN_AGENTS = {
   librarian: {
     label: 'Librarian',
-    workflow_id: '316e7cc7-01d5-81f4-a1d0-0092ce682e4a',
+    notion_internal_id: '316e7cc7-01d5-81f4-a1d0-0092ce682e4a',
     space_id:    'f04bc8a1-18df-42d1-ba9f-961c491cdc1b',
-    block_id:    '316e7cc7-01d5-812e-be04-f06d86525bc2',
+    notion_public_id:    '316e7cc7-01d5-812e-be04-f06d86525bc2',
   },
 };
 

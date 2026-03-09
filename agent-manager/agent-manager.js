@@ -209,11 +209,11 @@ async function handleDump() {
   await withUIBlock(`Dumping current instructions for "${key}"...`, async () => {
     const res = await runInNotionTab({
       action: 'dump',
-      blockId: cfg.block_id,
+      blockId: cfg.notion_public_id,
       spaceId: cfg.space_id,
     });
     logLines(res.log);
-    const md = blocksToMarkdown(res.recordMap.block, cfg.block_id);
+    const md = blocksToMarkdown(res.recordMap.block, cfg.notion_public_id);
     $('instructions').value = md || '(empty)';
     logLine('Done. Instructions loaded into editor.', 'ok');
   });
@@ -228,9 +228,9 @@ async function handleUpdate(publish) {
   await withUIBlock(`Updating "${key}" instructions (${newBlocks.length} block(s))...`, async () => {
     const res = await runInNotionTab({
       action: 'update',
-      blockId:    cfg.block_id,
+      blockId:    cfg.notion_public_id,
       spaceId:    cfg.space_id,
-      workflowId: publish ? cfg.workflow_id : null,
+      workflowId: publish ? cfg.notion_internal_id : null,
       newBlocks,
     });
     logLines(res.log);
@@ -252,7 +252,7 @@ async function handleDryRun() {
     ...newBlocks.map((b, i) => `  [${i}] type=${b.type}  text=${JSON.stringify(b.properties?.title?.[0]?.[0] ?? '').slice(0, 80)}`),
     '',
     'Payload that would be POSTed:',
-    JSON.stringify({ blockId: cfg.block_id, spaceId: cfg.space_id, workflowId: cfg.workflow_id, newBlockCount: newBlocks.length }, null, 2),
+    JSON.stringify({ blockId: cfg.notion_public_id, spaceId: cfg.space_id, workflowId: cfg.notion_internal_id, newBlockCount: newBlocks.length }, null, 2),
     '[No API calls made]',
   ];
   logLines(lines);
@@ -266,7 +266,7 @@ async function handlePublishOnly() {
     const res = await runInNotionTab({
       action: 'publish',
       spaceId:    cfg.space_id,
-      workflowId: cfg.workflow_id,
+      workflowId: cfg.notion_internal_id,
     });
     logLines(res.log);
     logLine('Done.', 'ok');

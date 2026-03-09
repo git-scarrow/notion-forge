@@ -15,14 +15,13 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 try:
-    from . import notion_api
+    from . import notion_api, config
 except ImportError:
-    import notion_api
+    import notion_api, config
 
-# Constants
-WORK_ITEMS_DB_ID = "daeb64d4-e5a8-4a7b-b0dc-7555cbc3def6"
-LAB_PROJECTS_DB_ID = "389645af-0e4f-479e-a910-79b169a99462"
-AUDIT_LOG_DB_ID = "4621be9a-0709-443e-bee6-7e6166f76fae"
+# Use config instance
+CFG = config.get_config()
+
 MODEL_EPOCH = datetime(2026, 3, 6, tzinfo=timezone.utc)
 
 TERMINAL_STATUSES = {"Done", "Passed", "Kill Condition Met", "Inconclusive", "Closed", "Blocked"}
@@ -35,9 +34,10 @@ def _get_select(props: dict, key: str) -> str | None:
 
 def check_work_item_invariants(client: notion_api.NotionAPIClient) -> int:
     """E.1 Safety, E.4 Liveness, E.7 Unconsumed Signal — all on Work Items."""
-    items = client.query_all(WORK_ITEMS_DB_ID)
+    items = client.query_all(CFG.work_items_db_id)
     violations = 0
     now = datetime.now(timezone.utc)
+
 
     for item in items:
         props = item.get("properties", {})
@@ -109,8 +109,9 @@ def check_work_item_invariants(client: notion_api.NotionAPIClient) -> int:
 
 def check_project_invariants(client: notion_api.NotionAPIClient) -> int:
     """E.2 Exclusive Ownership — Active GitHub Issue on Lab Projects."""
-    projects = client.query_all(LAB_PROJECTS_DB_ID)
+    projects = client.query_all(CFG.lab_projects_db_id)
     violations = 0
+
 
     for project in projects:
         props = project.get("properties", {})
@@ -167,13 +168,10 @@ def check_invariants(client: notion_api.NotionAPIClient) -> int:
 
 
 def main():
-    token = os.environ.get("NOTION_TOKEN")
-    if not token:
-        print("ERROR: NOTION_TOKEN required")
-        sys.exit(1)
-
+    token = CFG.notion_token
     client = notion_api.NotionAPIClient(token)
     violations = check_invariants(client)
+
 
     if violations > 0:
         sys.exit(1)

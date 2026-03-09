@@ -1,3 +1,5 @@
+import sys
+from datetime import datetime, timezone
 """
 notion_client.py — HTTP client for Notion's internal /api/v3/ endpoints.
 
@@ -23,19 +25,29 @@ MAX_RETRIES = 3
 BACKOFF_BASE = 1  # seconds
 
 
-def _make_headers(token_v2: str, user_id: str | None = None) -> dict:
+def _make_headers(token_v2: str, user_id: str | None = None, space_id: str | None = None) -> dict:
+    cookie = f"token_v2={token_v2}"
+    if user_id:
+        cookie += f"; notion_user_id={user_id}"
+        
     headers = {
         "Content-Type": "application/json",
-        "Cookie": f"token_v2={token_v2}",
-        "Notion-Audit-Log-Platform": "web",
+        "Cookie": cookie,
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0",
+        "notion-audit-log-platform": "web",
+        "notion-client-version": "23.13.20260307.1532",
+        "Origin": "https://www.notion.so",
+        "Referer": "https://www.notion.so/",
     }
     if user_id:
         headers["x-notion-active-user-header"] = user_id
+    if space_id:
+        headers["x-notion-space-id"] = space_id
     return headers
 
 
 def _post(endpoint: str, payload: dict, token_v2: str, user_id: str | None = None,
-          dry_run: bool = False) -> dict:
+          dry_run: bool = False, space_id: str | None = None) -> dict:
     """POST to a Notion internal endpoint with retry on 5xx."""
     url = f"{BASE_URL}/{endpoint}"
     body = json.dumps(payload).encode()
@@ -45,7 +57,7 @@ def _post(endpoint: str, payload: dict, token_v2: str, user_id: str | None = Non
         print(json.dumps(payload, indent=2))
         return {}
 
-    headers = _make_headers(token_v2, user_id)
+    headers = _make_headers(token_v2, user_id, space_id)
     last_err = None
 
     for attempt in range(MAX_RETRIES):
@@ -118,18 +130,18 @@ def get_all_workspace_agents(space_id: str, token_v2: str,
     Enumerate all AI agents (workflows) in a Notion workspace.
 
     Uses two calls:
-      1. POST /api/v3/getBots — returns bot records keyed by bot_id, each with workflow_id
-      2. POST /api/v3/getRecordValues (batched) — fetches all workflow records for name + block_id
+      1. POST /api/v3/getBots — returns bot records keyed by bot_id, each with notion_internal_id
+      2. POST /api/v3/getRecordValues (batched) — fetches all workflow records for name + notion_public_id
 
     Returns a list of dicts:
-      {name, workflow_id, space_id, block_id}
+      {name, notion_internal_id, space_id, notion_public_id}
     """
     # Step 1: getBots — list all workflow-type bots in the space
     bots_data = _post("getBots", {"table": "space", "id": space_id, "type": "workflow"},
                       token_v2, user_id)
     bot_records = bots_data.get("recordMap", {}).get("bot", {})
 
-    # Collect unique workflow_ids, keeping highest version per workflow
+    # Collect unique notion_internal_ids, keeping highest version per workflow
     seen: dict[str, dict] = {}
     for bot_data in bot_records.values():
         v = bot_data.get("value", {})
@@ -146,11 +158,11 @@ def get_all_workspace_agents(space_id: str, token_v2: str,
     if not seen:
         return []
 
-    workflow_ids = list(seen.keys())
+    notion_internal_ids = list(seen.keys())
 
-    # Step 2: batch getRecordValues — fetch all workflow records for block_id
+    # Step 2: batch getRecordValues — fetch all workflow records for notion_public_id
     batch_payload = {
-        "requests": [{"id": wid, "table": "workflow"} for wid in workflow_ids],
+        "requests": [{"id": wid, "table": "workflow"} for wid in notion_internal_ids],
     }
     wf_data = _post("getRecordValues", batch_payload, token_v2, user_id)
 
@@ -159,38 +171,38 @@ def get_all_workspace_agents(space_id: str, token_v2: str,
         wf = result.get("value")
         if not wf:
             continue
-        wf_id = workflow_ids[i]
+        wf_id = notion_internal_ids[i]
         data = wf.get("data", {})
         name = data.get("name") or seen[wf_id]["name"]
         instructions = data.get("instructions")
         if not instructions:
             continue
-        block_id = instructions["id"] if isinstance(instructions, dict) else instructions
+        notion_public_id = instructions["id"] if isinstance(instructions, dict) else instructions
         agents.append({
             "name": name,
-            "workflow_id": wf_id,
+            "notion_internal_id": wf_id,
             "space_id": wf.get("space_id", space_id),
-            "block_id": block_id,
+            "notion_public_id": notion_public_id,
             "triggers": data.get("triggers", []),
         })
 
     return sorted(agents, key=lambda a: a["name"].lower())
 
 
-def get_workflow_record(workflow_id: str, token_v2: str,
+def get_workflow_record(notion_internal_id: str, token_v2: str,
                         user_id: str | None = None) -> dict:
     """
     Fetch a workflow record via getRecordValues (table: "workflow").
     Returns the workflow's value dict with keys like name, data, space_id, etc.
     """
     payload = {
-        "requests": [{"id": workflow_id, "table": "workflow"}],
+        "requests": [{"id": notion_internal_id, "table": "workflow"}],
     }
     data = _post("getRecordValues", payload, token_v2, user_id)
     results = data.get("results", [])
     if not results or not results[0].get("value"):
         raise RuntimeError(
-            f"Workflow {workflow_id} not found or inaccessible. "
+            f"Workflow {notion_internal_id} not found or inaccessible. "
             f"Response: {data}"
         )
     return results[0]["value"]
@@ -198,11 +210,11 @@ def get_workflow_record(workflow_id: str, token_v2: str,
 
 # ── Read ──────────────────────────────────────────────────────────────────────
 
-def get_block_children(block_id: str, space_id: str,
+def get_block_children(notion_public_id: str, space_id: str,
                        token_v2: str, user_id: str | None = None) -> list[str]:
     """Return ordered list of child block IDs for a given block."""
     payload = {
-        "pageId": block_id,
+        "pageId": notion_public_id,
         "limit": 100,
         "cursor": {"stack": []},
         "chunkNumber": 0,
@@ -213,11 +225,11 @@ def get_block_children(block_id: str, space_id: str,
     record_map = data.get("recordMap", {})
     blocks = record_map.get("block", {})
 
-    parent = blocks.get(block_id, {}).get("value", {})
+    parent = blocks.get(notion_public_id, {}).get("value", {})
     return parent.get("content", [])
 
 
-def get_block_tree(block_id: str, space_id: str,
+def get_block_tree(notion_public_id: str, space_id: str,
                    token_v2: str, user_id: str | None = None) -> dict:
     """Return the full recordMap for a block and all its descendants, paginating as needed."""
     cursor = {"stack": []}
@@ -226,7 +238,7 @@ def get_block_tree(block_id: str, space_id: str,
 
     while True:
         payload = {
-            "pageId": block_id,
+            "pageId": notion_public_id,
             "limit": 500,
             "cursor": cursor,
             "chunkNumber": 0,
@@ -268,7 +280,7 @@ def get_db_automations(db_page_id: str, token_v2: str,
         }
     """
     payload = {
-        "pageId": db_page_id,
+        "page": {"id": db_page_id},
         "limit": 100,
         "cursor": {"stack": []},
         "chunkNumber": 0,
@@ -330,8 +342,8 @@ def _tx(space_id: str, operations: list[dict], *,
     return payload
 
 
-def _block_pointer(block_id: str, space_id: str) -> dict:
-    return {"table": "block", "id": block_id, "spaceId": space_id}
+def _block_pointer(notion_public_id: str, space_id: str) -> dict:
+    return {"table": "block", "id": notion_public_id, "spaceId": space_id}
 
 
 def send_ops(space_id: str, ops: list[dict],
@@ -341,7 +353,8 @@ def send_ops(space_id: str, ops: list[dict],
     """Send a batch of operations in a single transaction."""
     if not ops:
         return
-    _post("saveTransactionsFanout", _tx(space_id, ops, user_action=user_action), token_v2, user_id, dry_run)
+    _post("saveTransactionsFanout", _tx(space_id, ops, user_action=user_action), 
+          token_v2, user_id, dry_run, space_id=space_id)
 
 
 def _record_value(entry: dict | None) -> dict:
@@ -359,11 +372,11 @@ def _record_value(entry: dict | None) -> dict:
 
 # ── Op collectors (build ops without sending) ────────────────────────────────
 
-def _ops_delete_block(block_id: str, parent_id: str, space_id: str) -> list[dict]:
+def _ops_delete_block(notion_public_id: str, parent_id: str, space_id: str) -> list[dict]:
     """Return ops to soft-delete a block and remove from parent content."""
     return [
         {
-            "pointer": _block_pointer(block_id, space_id),
+            "pointer": _block_pointer(notion_public_id, space_id),
             "path": [],
             "command": "update",
             "args": {"alive": False},
@@ -372,20 +385,20 @@ def _ops_delete_block(block_id: str, parent_id: str, space_id: str) -> list[dict
             "pointer": _block_pointer(parent_id, space_id),
             "path": ["content"],
             "command": "listRemove",
-            "args": {"id": block_id},
+            "args": {"id": notion_public_id},
         },
     ]
 
 
 def _ops_insert_block(block: dict, parent_id: str, after_id: str | None,
                       space_id: str) -> tuple[list[dict], str]:
-    """Return (ops, new_block_id) to insert a block. Handles children recursively."""
+    """Return (ops, new_notion_public_id) to insert a block. Handles children recursively."""
     children = block.pop("children", None)
-    block_id = str(uuid.uuid4())
+    notion_public_id = str(uuid.uuid4())
     now = int(time.time() * 1000)
 
     block_value = {
-        "id": block_id,
+        "id": notion_public_id,
         "parent_id": parent_id,
         "parent_table": "block",
         "alive": True,
@@ -395,13 +408,13 @@ def _ops_insert_block(block: dict, parent_id: str, after_id: str | None,
         **block,
     }
 
-    list_after_args: dict[str, Any] = {"id": block_id}
+    list_after_args: dict[str, Any] = {"id": notion_public_id}
     if after_id:
         list_after_args["after"] = after_id
 
     ops = [
         {
-            "pointer": _block_pointer(block_id, space_id),
+            "pointer": _block_pointer(notion_public_id, space_id),
             "path": [],
             "command": "set",
             "args": block_value,
@@ -418,20 +431,20 @@ def _ops_insert_block(block: dict, parent_id: str, after_id: str | None,
         child_after = None
         for child_block in children:
             child_ops, child_id = _ops_insert_block(
-                child_block, block_id, child_after, space_id,
+                child_block, notion_public_id, child_after, space_id,
             )
             ops.extend(child_ops)
             child_after = child_id
 
-    return ops, block_id
+    return ops, notion_public_id
 
 
-def _ops_update_block(block_id: str, space_id: str,
+def _ops_update_block(notion_public_id: str, space_id: str,
                       properties: dict, format_: dict | None = None) -> list[dict]:
     """Return ops to update a block's properties (and optionally format) in place."""
     ops = [
         {
-            "pointer": _block_pointer(block_id, space_id),
+            "pointer": _block_pointer(notion_public_id, space_id),
             "path": ["properties"],
             "command": "set",
             "args": properties,
@@ -439,7 +452,7 @@ def _ops_update_block(block_id: str, space_id: str,
     ]
     if format_ is not None:
         ops.append({
-            "pointer": _block_pointer(block_id, space_id),
+            "pointer": _block_pointer(notion_public_id, space_id),
             "path": ["format"],
             "command": "set",
             "args": format_,
@@ -449,11 +462,11 @@ def _ops_update_block(block_id: str, space_id: str,
 
 # ── Legacy single-call wrappers ──────────────────────────────────────────────
 
-def delete_block(block_id: str, parent_id: str, space_id: str,
+def delete_block(notion_public_id: str, parent_id: str, space_id: str,
                  token_v2: str, user_id: str | None = None,
                  dry_run: bool = False) -> None:
     """Soft-delete a block and remove it from its parent's content list."""
-    send_ops(space_id, _ops_delete_block(block_id, parent_id, space_id),
+    send_ops(space_id, _ops_delete_block(notion_public_id, parent_id, space_id),
              token_v2, user_id, dry_run)
 
 
@@ -462,9 +475,9 @@ def insert_block(block: dict, parent_id: str, after_id: str | None,
                  dry_run: bool = False) -> str:
     """Insert a new block into parent_id after after_id (or at start if None).
     Returns the new block's ID."""
-    ops, block_id = _ops_insert_block(block, parent_id, after_id, space_id)
+    ops, notion_public_id = _ops_insert_block(block, parent_id, after_id, space_id)
     send_ops(space_id, ops, token_v2, user_id, dry_run)
-    return block_id
+    return notion_public_id
 
 
 # ── Block fingerprinting ─────────────────────────────────────────────────────
@@ -530,14 +543,14 @@ def _api_block_fingerprint(block: dict, blocks_map: dict) -> tuple:
 
 # ── Diff-based replace ───────────────────────────────────────────────────────
 
-def _collect_delete_tree_ops(block_id: str, parent_id: str, space_id: str,
+def _collect_delete_tree_ops(notion_public_id: str, parent_id: str, space_id: str,
                              blocks_map: dict) -> list[dict]:
     """Collect ops to delete a block and all its descendants."""
     ops = []
-    block = blocks_map.get(block_id, {}).get("value", {})
+    block = blocks_map.get(notion_public_id, {}).get("value", {})
     for child_id in block.get("content", []):
-        ops.extend(_collect_delete_tree_ops(child_id, block_id, space_id, blocks_map))
-    ops.extend(_ops_delete_block(block_id, parent_id, space_id))
+        ops.extend(_collect_delete_tree_ops(child_id, notion_public_id, space_id, blocks_map))
+    ops.extend(_ops_delete_block(notion_public_id, parent_id, space_id))
     return ops
 
 
@@ -744,7 +757,7 @@ def replace_block_content(parent_id: str, space_id: str,
         insert_ops, after_id = _ops_insert_block(block, parent_id, after_id, space_id)
         ops.extend(insert_ops)
 
-    send_ops(space_id, ops, token_v2, user_id, dry_run)
+    send_ops(space_id, ops, token_v2, user_id, user_action="agentPersistenceActions.addPage", dry_run=dry_run)
 
 
 # ── Conversations ─────────────────────────────────────────────────────────────
@@ -995,7 +1008,7 @@ def search_threads(query: str, space_id: str, token_v2: str,
     return matches
 
 
-def list_workflow_threads(workflow_id: str, space_id: str,
+def list_workflow_threads(notion_internal_id: str, space_id: str,
                           token_v2: str, user_id: str | None = None,
                           limit: int = 100) -> list[dict]:
     """
@@ -1012,7 +1025,7 @@ def list_workflow_threads(workflow_id: str, space_id: str,
 
     while True:
         payload = {
-            "workflowId": workflow_id,
+            "notion_internal_id": notion_internal_id,
             "spaceId": space_id,
             "limit": limit,
         }
@@ -1095,7 +1108,7 @@ def archive_threads(thread_ids: list[str], space_id: str,
     return ordered_ids
 
 
-def archive_workflow_threads(workflow_id: str, space_id: str,
+def archive_workflow_threads(notion_internal_id: str, space_id: str,
                              token_v2: str, user_id: str | None = None,
                              limit: int = 100) -> dict:
     """
@@ -1106,7 +1119,7 @@ def archive_workflow_threads(workflow_id: str, space_id: str,
     that routes future trigger events — the trigger fires but silently drops.
     Only archive threads with no trigger_id (New Chat / @mention sessions).
     """
-    threads = list_workflow_threads(workflow_id, space_id, token_v2, user_id, limit=limit)
+    threads = list_workflow_threads(notion_internal_id, space_id, token_v2, user_id, limit=limit)
     manual_ids = [
         thread["id"] for thread in threads
         if thread.get("id") and not thread.get("trigger_id")
@@ -1134,29 +1147,29 @@ MODEL_NAMES = {
 }
 
 
-def _resolve_page_names(block_ids: list[str], token_v2: str,
+def _resolve_page_names(notion_public_ids: list[str], token_v2: str,
                         user_id: str | None = None) -> dict[str, str]:
     """Batch-resolve block IDs to page titles (handles collection_view_page)."""
-    if not block_ids:
+    if not notion_public_ids:
         return {}
     payload = {
-        "requests": [{"id": bid, "table": "block"} for bid in block_ids],
+        "requests": [{"id": bid, "table": "block"} for bid in notion_public_ids],
     }
     data = _post("getRecordValues", payload, token_v2, user_id)
     names = {}
-    coll_ids_to_resolve: dict[str, str] = {}  # collection_id -> block_id
+    coll_ids_to_resolve: dict[str, str] = {}  # collection_id -> notion_public_id
 
     for i, result in enumerate(data.get("results", [])):
         val = result.get("value", {})
         title_prop = val.get("properties", {}).get("title", [])
         if title_prop:
-            names[block_ids[i]] = "".join(c[0] for c in title_prop if c)
+            names[notion_public_ids[i]] = "".join(c[0] for c in title_prop if c)
         else:
             coll_id = val.get("collection_id")
             if coll_id:
-                coll_ids_to_resolve[coll_id] = block_ids[i]
+                coll_ids_to_resolve[coll_id] = notion_public_ids[i]
             else:
-                names[block_ids[i]] = block_ids[i]
+                names[notion_public_ids[i]] = notion_public_ids[i]
 
     # Resolve collection_view_page names from collection records
     if coll_ids_to_resolve:
@@ -1174,7 +1187,7 @@ def _resolve_page_names(block_ids: list[str], token_v2: str,
     return names
 
 
-def get_agent_modules(workflow_id: str, token_v2: str,
+def get_agent_modules(notion_internal_id: str, token_v2: str,
                       user_id: str | None = None,
                       resolve_names: bool = True) -> dict:
     """
@@ -1191,7 +1204,7 @@ def get_agent_modules(workflow_id: str, token_v2: str,
           ]
         }
     """
-    wf = get_workflow_record(workflow_id, token_v2, user_id)
+    wf = get_workflow_record(notion_internal_id, token_v2, user_id)
     data = wf.get("data", {})
 
     model_raw = data.get("model") or {}
@@ -1201,7 +1214,7 @@ def get_agent_modules(workflow_id: str, token_v2: str,
     modules = []
 
     # Collect block IDs that need name resolution
-    block_ids_to_resolve: list[str] = []
+    notion_public_ids_to_resolve: list[str] = []
 
     for m in modules_raw:
         mod: dict = {
@@ -1219,8 +1232,8 @@ def get_agent_modules(workflow_id: str, token_v2: str,
                     "scope": ident.get("type"),
                 }
                 if ident.get("blockId"):
-                    perm["blockId"] = ident["blockId"]
-                    block_ids_to_resolve.append(ident["blockId"])
+                    perm["notion_public_id"] = ident["blockId"]
+                    notion_public_ids_to_resolve.append(ident["blockId"])
                 perms.append(perm)
             mod["permissions"] = perms
 
@@ -1254,11 +1267,11 @@ def get_agent_modules(workflow_id: str, token_v2: str,
         modules.append(mod)
 
     # Resolve block IDs to page names
-    if resolve_names and block_ids_to_resolve:
-        names = _resolve_page_names(block_ids_to_resolve, token_v2, user_id)
+    if resolve_names and notion_public_ids_to_resolve:
+        names = _resolve_page_names(notion_public_ids_to_resolve, token_v2, user_id)
         for mod in modules:
             for perm in mod.get("permissions", []):
-                bid = perm.get("blockId")
+                bid = perm.get("notion_public_id")
                 if bid and bid in names:
                     perm["pageName"] = names[bid]
 
@@ -1268,7 +1281,7 @@ def get_agent_modules(workflow_id: str, token_v2: str,
     }
 
 
-def update_agent_modules(workflow_id: str, space_id: str,
+def update_agent_modules(notion_internal_id: str, space_id: str,
                          modules: list[dict],
                          token_v2: str, user_id: str | None = None) -> None:
     """
@@ -1278,7 +1291,7 @@ def update_agent_modules(workflow_id: str, space_id: str,
     Use get_workflow_record to read the current state, modify, then pass here.
     """
     ops = [{
-        "pointer": {"table": "workflow", "id": workflow_id, "spaceId": space_id},
+        "pointer": {"table": "workflow", "id": notion_internal_id, "spaceId": space_id},
         "path": ["data", "modules"],
         "command": "set",
         "args": modules,
@@ -1286,8 +1299,8 @@ def update_agent_modules(workflow_id: str, space_id: str,
     send_ops(space_id, ops, token_v2, user_id, user_action="WorkflowActions.saveModule")
 
 
-def grant_agent_resource_access(workflow_id: str, space_id: str,
-                                block_id: str, role: str,
+def grant_agent_resource_access(notion_internal_id: str, space_id: str,
+                                notion_public_id: str, role: str,
                                 token_v2: str, user_id: str | None = None) -> dict:
     """
     Authoritatively grant an agent access to a specific Notion resource.
@@ -1297,14 +1310,14 @@ def grant_agent_resource_access(workflow_id: str, space_id: str,
       3. Publish the agent to synchronize.
     """
     # 1. Fetch current state to get bots and update modules array
-    wf = get_workflow_record(workflow_id, token_v2, user_id)
+    wf = get_workflow_record(notion_internal_id, token_v2, user_id)
     modules = wf.get("data", {}).get("modules", [])
     
     runtime_bot = wf.get("data", {}).get("runtime_actor_pointer", {}).get("id")
     draft_bot = wf.get("data", {}).get("draft_runtime_actor_pointer", {}).get("id")
     
     if not runtime_bot:
-        raise ValueError(f"Agent {workflow_id} has no runtime_actor_pointer (bot). Publish it first.")
+        raise ValueError(f"Agent {notion_internal_id} has no runtime_actor_pointer (bot). Publish it first.")
 
     # Find the Notion module
     notion_mod = next((m for m in modules if m["type"] == "notion"), None)
@@ -1326,7 +1339,7 @@ def grant_agent_resource_access(workflow_id: str, space_id: str,
     api_actions = ["read_and_write"] if role in ["editor", "read_and_write"] else ["reader"]
     
     for p in perms:
-        if p.get("identifier", {}).get("blockId") == block_id:
+        if p.get("identifier", {}).get("blockId") == notion_public_id:
             p["actions"] = api_actions
             found = True
             break
@@ -1338,7 +1351,7 @@ def grant_agent_resource_access(workflow_id: str, space_id: str,
             "actions": api_actions,
             "identifier": {
                 "type": "pageOrCollectionViewBlock",
-                "blockId": block_id
+                "blockId": notion_public_id
             }
         })
     
@@ -1353,7 +1366,7 @@ def grant_agent_resource_access(workflow_id: str, space_id: str,
     auth_ops = []
     for bot_id in filter(None, [runtime_bot, draft_bot]):
         auth_ops.append({
-            "pointer": {"table": "block", "id": block_id, "spaceId": space_id},
+            "pointer": {"table": "block", "id": notion_public_id, "spaceId": space_id},
             "command": "setPermissionItem",
             "path": ["permissions"],
             "args": {
@@ -1365,19 +1378,19 @@ def grant_agent_resource_access(workflow_id: str, space_id: str,
         })
 
     # 3. Execute all: Update modules (Intent) + Grant (Authorization)
-    update_agent_modules(workflow_id, space_id, modules, token_v2, user_id)
+    update_agent_modules(notion_internal_id, space_id, modules, token_v2, user_id)
     send_ops(space_id, auth_ops, token_v2, user_id, user_action="NotionModulePermissions.restoreResourceAccess")
 
     # 4. Final Publish Handshake
-    return publish_agent(workflow_id, space_id, token_v2, user_id)
+    return publish_agent(notion_internal_id, space_id, token_v2, user_id)
 
 
-def update_agent_model(workflow_id: str, space_id: str,
+def update_agent_model(notion_internal_id: str, space_id: str,
                        model_type: str,
                        token_v2: str, user_id: str | None = None) -> None:
     """Update a Notion AI agent's model selection."""
     ops = [{
-        "pointer": {"table": "workflow", "id": workflow_id, "spaceId": space_id},
+        "pointer": {"table": "workflow", "id": notion_internal_id, "spaceId": space_id},
         "path": ["data", "model"],
         "command": "set",
         "args": {"type": model_type},
@@ -1396,16 +1409,16 @@ def create_agent(space_id: str, name: str, icon: str | None,
       - Create the initial 'text' block inside the instructions page
       - Link them together
 
-    Returns {workflow_id, block_id} on success.
+    Returns {notion_internal_id, notion_public_id} on success.
     """
-    workflow_id = str(uuid.uuid4())
-    instruction_block_id = str(uuid.uuid4())
-    initial_text_block_id = str(uuid.uuid4())
+    notion_internal_id = str(uuid.uuid4())
+    instruction_notion_public_id = str(uuid.uuid4())
+    initial_text_notion_public_id = str(uuid.uuid4())
     now = int(time.time() * 1000)
 
     # 1. Workflow record
     wf_args = {
-        "id": workflow_id,
+        "id": notion_internal_id,
         "version": 1,
         "parent_id": space_id,
         "parent_table": "space",
@@ -1429,7 +1442,7 @@ def create_agent(space_id: str, name: str, icon: str | None,
             "icon": icon or "https://www.notion.so/images/customAgentAvatars/rock-blue.png",
             "instructions": {
                 "table": "block",
-                "id": instruction_block_id,
+                "id": instruction_notion_public_id,
                 "spaceId": space_id
             }
         },
@@ -1450,11 +1463,11 @@ def create_agent(space_id: str, name: str, icon: str | None,
     # 2. Instruction block (page)
     # Notion uses a complex crdt_data for initial empty title, but a simple set works
     instr_args = {
-        "id": instruction_block_id,
+        "id": instruction_notion_public_id,
         "type": "page",
         "properties": {"title": [["Instructions"]]},
         "space_id": space_id,
-        "parent_id": workflow_id,
+        "parent_id": notion_internal_id,
         "parent_table": "workflow",
         "alive": True,
         "created_time": now,
@@ -1467,11 +1480,11 @@ def create_agent(space_id: str, name: str, icon: str | None,
 
     # 3. Initial text block
     text_args = {
-        "id": initial_text_block_id,
+        "id": initial_text_notion_public_id,
         "type": "text",
         "properties": {"title": [["Get started..."]]},
         "space_id": space_id,
-        "parent_id": instruction_block_id,
+        "parent_id": instruction_notion_public_id,
         "parent_table": "block",
         "alive": True,
         "created_time": now,
@@ -1483,24 +1496,24 @@ def create_agent(space_id: str, name: str, icon: str | None,
     }
 
     ops = [
-        {"pointer": {"table": "workflow", "id": workflow_id, "spaceId": space_id}, "command": "set", "path": [], "args": wf_args},
-        {"pointer": _block_pointer(instruction_block_id, space_id), "command": "set", "path": [], "args": instr_args},
-        {"pointer": _block_pointer(initial_text_block_id, space_id), "command": "set", "path": [], "args": text_args},
-        {"pointer": _block_pointer(instruction_block_id, space_id), "command": "listAfter", "path": ["content"], "args": {"after": None, "id": initial_text_block_id}}
+        {"pointer": {"table": "workflow", "id": notion_internal_id, "spaceId": space_id}, "command": "set", "path": [], "args": wf_args},
+        {"pointer": _block_pointer(instruction_notion_public_id, space_id), "command": "set", "path": [], "args": instr_args},
+        {"pointer": _block_pointer(initial_text_notion_public_id, space_id), "command": "set", "path": [], "args": text_args},
+        {"pointer": _block_pointer(instruction_notion_public_id, space_id), "command": "listAfter", "path": ["content"], "args": {"after": None, "id": initial_text_notion_public_id}}
     ]
 
     send_ops(space_id, ops, token_v2, user_id, user_action="agentActions.createBlankAgent")
 
     return {
-        "workflow_id": workflow_id,
-        "block_id": instruction_block_id
+        "notion_internal_id": notion_internal_id,
+        "notion_public_id": instruction_notion_public_id
     }
 
 
-def add_agent_to_sidebar(space_id: str, workflow_id: str,
+def add_agent_to_sidebar(space_id: str, notion_internal_id: str,
                          token_v2: str, user_id: str) -> None:
     """
-    Append a workflow ID to the user's sidebar (space_view.settings.sidebar_workflow_ids).
+    Append a workflow ID to the user's sidebar (space_view.settings.sidebar_notion_internal_ids).
     """
     # 1. Find space_view ID
     data = _post("loadUserContent", {}, token_v2)
@@ -1519,14 +1532,120 @@ def add_agent_to_sidebar(space_id: str, workflow_id: str,
         "pointer": {"table": "space_view", "id": space_view_id, "spaceId": space_id},
         "path": ["settings", "sidebar_workflow_ids"],
         "command": "listAfter",
-        "args": {"id": workflow_id}
+        "args": {"id": notion_internal_id}
     }]
     send_ops(space_id, ops, token_v2, user_id, user_action="sidebarWorkflowsActions.addSidebarWorkflow")
 
 
+def send_agent_message(thread_id: str, space_id: str, notion_internal_id: str, content: str,
+                       token_v2: str, user_id: str | None = None,
+                       dry_run: bool = False) -> str:
+    """
+    Append a user message to a Notion AI thread and trigger an inference.
+    Returns the new user message ID.
+    """
+    msg_id = str(uuid.uuid4())
+    trace_id = str(uuid.uuid4())
+    now_ms = int(time.time() * 1000)
+    
+    # Format timestamp exactly as UI: 2026-03-07T16:35:44.690-05:00
+    now_dt = datetime.fromtimestamp(now_ms/1000).astimezone()
+    offset_str = now_dt.strftime("%z")
+    offset_formatted = f"{offset_str[:3]}:{offset_str[3:]}"
+    now_iso = now_dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + offset_formatted
+    
+    # 1. Human message transaction
+    msg_args = {
+        "id": msg_id,
+        "version": 1,
+        "step": {
+            "id": msg_id,
+            "type": "user",
+            "value": [[content]],
+            "userId": user_id,
+            "createdAt": now_iso
+        },
+        "parent_id": thread_id,
+        "parent_table": "thread",
+        "space_id": space_id,
+        "created_time": now_ms,
+        "created_by_id": user_id,
+        "created_by_table": "notion_user"
+    }
+    
+    ops = [
+        {"pointer": {"table": "thread_message", "id": msg_id, "spaceId": space_id}, "command": "set", "path": [], "args": msg_args},
+        {"pointer": {"table": "thread", "id": thread_id, "spaceId": space_id}, "command": "listAfterMulti", "path": ["messages"], "args": {"ids": [msg_id]}},
+        {"pointer": {"table": "thread", "id": thread_id, "spaceId": space_id}, "command": "update", "path": [], "args": {"updated_time": now_ms, "updated_by_id": user_id, "updated_by_table": "notion_user"}}
+    ]
+    
+    send_ops(space_id, ops, token_v2, user_id, user_action="WorkflowActions.addStepsToExistingThreadAndRun", dry_run=dry_run)
+    
+    if dry_run:
+        return msg_id
+
+    # 2. Trigger inference (Rich transcript payload mirroring UI exactly)
+    inference_payload = {
+        "traceId": trace_id,
+        "spaceId": space_id,
+        "threadId": thread_id,
+        "transcript": [
+            {
+                "id": str(uuid.uuid4()),
+                "type": "config",
+                "value": {
+                    "type": "workflow",
+                    "enableAgentAutomations": True,
+                    "enableAgentIntegrations": True,
+                    "enableCustomAgents": True,
+                    "enableScriptAgent": True,
+                    "useWebSearch": True,
+                    "workflowId": notion_internal_id,
+                    "availableConnectors": ["notion-mail", "notion-calendar", "github", "linear"],
+                    "searchScopes": [{"type": "everything"}],
+                    "model": "avocado-froyo-medium",
+                    "isCustomAgent": True,
+                    "useCustomAgentDraft": True,
+                    "enableUpdatePageAutofixer": True
+                }
+            },
+            {
+                "id": str(uuid.uuid4()),
+                "type": "context",
+                "value": {
+                    "timezone": "America/New_York",
+                    "userName": "Sam Scarrow",
+                    "userId": user_id,
+                    "userEmail": "sscarrow@gmail.com",
+                    "spaceName": "Sam Scarrow's Notion",
+                    "spaceId": space_id,
+                    "workflowId": notion_internal_id,
+                    "surface": "custom_agent"
+                }
+            },
+            {
+                "id": msg_id,
+                "type": "user",
+                "value": [[content]],
+                "userId": user_id,
+                "createdAt": now_iso
+            }
+        ],
+        "threadType": "workflow",
+        "isPartialTranscript": True,
+        "asPatchResponse": True,
+        "saveAllThreadOperations": True,
+        "setUnreadState": True
+    }
+    
+    _post("runInferenceTranscript", inference_payload, token_v2, user_id)
+    
+    return msg_id
+
+
 # ── Publish ───────────────────────────────────────────────────────────────────
 
-def publish_agent(workflow_id: str, space_id: str,
+def publish_agent(notion_internal_id: str, space_id: str,
                   token_v2: str, user_id: str | None = None,
                   dry_run: bool = False,
                   archive_existing: bool = True) -> dict:
@@ -1537,7 +1656,7 @@ def publish_agent(workflow_id: str, space_id: str,
     archive_existing: If True, clear out old chats (standard for instruction updates).
                       If False, keep existing chats (used during initial creation).
     """
-    payload = {"workflowId": workflow_id, "spaceId": space_id}
+    payload = {"workflowId": notion_internal_id, "spaceId": space_id}
 
     try:
         result = _post("publishCustomAgentVersion", payload, token_v2, user_id, dry_run)
@@ -1562,7 +1681,7 @@ def publish_agent(workflow_id: str, space_id: str,
 
     if archive_existing:
         try:
-            cleanup = archive_workflow_threads(workflow_id, space_id, token_v2, user_id)
+            cleanup = archive_workflow_threads(notion_internal_id, space_id, token_v2, user_id)
             result["archivedThreadCount"] = cleanup["count"]
             result["archivedThreadIds"] = cleanup["threadIds"]
         except Exception as e:

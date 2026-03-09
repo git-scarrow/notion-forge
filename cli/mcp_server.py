@@ -29,8 +29,13 @@ import block_builder
 import cookie_extract
 import notion_api
 import notion_client
+import config
+
+# Use config instance
+CFG = config.get_config()
 
 AGENTS_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents.yaml")
+
 
 mcp = FastMCP(
     "notion-agents",
@@ -156,14 +161,24 @@ def auth_retry(tool_fn):
 
 
 def _get_agent_config(name: str) -> dict:
-    """Look up an agent in the registry. Raises ValueError if not found."""
+    """Look up an agent in the registry. Handles both old and new schema keys."""
     registry = _load_registry()
     if name not in registry:
         available = ", ".join(sorted(registry.keys())) or "(none)"
         raise ValueError(f"Agent '{name}' not found. Available: {available}")
-    cfg = registry[name]
-    required = {"workflow_id", "space_id", "block_id"}
-    missing = required - set(cfg.keys())
+    
+    raw_cfg = registry[name]
+    
+    # Map to standardized internal keys
+    cfg = {
+        "notion_internal_id": raw_cfg.get("notion_internal_id") or raw_cfg.get("notion_internal_id"),
+        "notion_public_id": raw_cfg.get("notion_public_id") or raw_cfg.get("notion_public_id"),
+        "space_id": raw_cfg.get("space_id"),
+        "label": raw_cfg.get("label", name)
+    }
+    
+    required = {"notion_internal_id", "space_id", "notion_public_id"}
+    missing = {k for k in required if not cfg[k]}
     if missing:
         raise ValueError(f"Agent '{name}' is missing fields: {missing}")
     return cfg
@@ -181,9 +196,6 @@ def _to_dashed_uuid(s: str) -> str:
     if _UUID_DASHLESS.match(s):
         return f"{s[:8]}-{s[8:12]}-{s[12:16]}-{s[16:20]}-{s[20:]}"
     raise ValueError(f"Not a valid UUID: {s}")
-
-
-SPACE_ID = "f04bc8a1-18df-42d1-ba9f-961c491cdc1b"
 
 
 def _name_to_key(name: str) -> str:
@@ -254,13 +266,13 @@ def _update_agent_impl(
         return "Error: markdown produced no blocks. Check the content."
 
     stats = notion_client.diff_replace_block_content(
-        cfg["block_id"], cfg["space_id"], new_blocks, token, user_id,
+        cfg["notion_public_id"], cfg["space_id"], new_blocks, token, user_id,
     )
     msg = _build_update_message(agent_name, stats)
 
     if publish:
         result = notion_client.publish_agent(
-            cfg["workflow_id"], cfg["space_id"], token, user_id,
+            cfg["notion_internal_id"], cfg["space_id"], token, user_id,
         )
         msg += f" {_build_publish_message(agent_name, result)}"
 
@@ -277,8 +289,8 @@ def list_agents() -> str:
     if not registry:
         return "No agents registered. Use sync_registry to auto-populate from Notion."
     lines = []
-    for name, cfg in registry.items():
-        wid = cfg.get("workflow_id", "?")
+    for name, raw_cfg in registry.items():
+        wid = raw_cfg.get("notion_internal_id") or raw_cfg.get("notion_internal_id", "?")
         lines.append(f"- {name}: workflow={wid}")
     return "\n".join(lines)
 
@@ -289,10 +301,10 @@ def list_workspace_agents() -> str:
     """
     Enumerate all AI agents in the Notion workspace directly from the API.
     Does not require agents.yaml — queries Notion live.
-    Returns name, workflow_id, space_id, and block_id for every agent.
+    Returns name, notion_internal_id, space_id, and notion_public_id for every agent.
     """
     token, user_id = _get_auth()
-    agents = notion_client.get_all_workspace_agents(SPACE_ID, token, user_id)
+    agents = notion_client.get_all_workspace_agents(CFG.space_id, token, user_id)
     if not agents:
         return "No agents found in workspace."
     lines = []
@@ -300,9 +312,9 @@ def list_workspace_agents() -> str:
         lines.append(
             f"{a['name']}\n"
             f"  key:         {_name_to_key(a['name'])}\n"
-            f"  workflow_id: {a['workflow_id']}\n"
+            f"  notion_internal_id: {a['notion_internal_id']}\n"
             f"  space_id:    {a['space_id']}\n"
-            f"  block_id:    {a['block_id']}"
+            f"  notion_public_id:    {a['notion_public_id']}"
         )
     return "\n\n".join(lines)
 
@@ -316,7 +328,7 @@ def sync_registry() -> str:
     Returns a summary of what was added vs. already present.
     """
     token, user_id = _get_auth()
-    agents = notion_client.get_all_workspace_agents(SPACE_ID, token, user_id)
+    agents = notion_client.get_all_workspace_agents(CFG.space_id, token, user_id)
     if not agents:
         return "No agents found in workspace."
 
@@ -329,9 +341,9 @@ def sync_registry() -> str:
             skipped.append(f"  {key} (already registered)")
         else:
             registry[key] = {
-                "workflow_id": a["workflow_id"],
+                "notion_internal_id": a["notion_internal_id"],
                 "space_id": a["space_id"],
-                "block_id": a["block_id"],
+                "notion_public_id": a["notion_public_id"],
                 "label": a["name"],
             }
             added.append(f"  + {key} ({a['name']})")
@@ -359,12 +371,12 @@ def dump_agent(agent_name: str) -> str:
     cfg = _get_agent_config(agent_name)
     token, user_id = _get_auth()
     data = notion_client.get_block_tree(
-        cfg["block_id"], cfg["space_id"], token, user_id,
+        cfg["notion_public_id"], cfg["space_id"], token, user_id,
     )
     blocks_map = data.get("recordMap", {}).get("block", {})
     if not blocks_map:
         return "(No content found — block may be empty or inaccessible)"
-    md = block_builder.blocks_to_markdown(blocks_map, cfg["block_id"])
+    md = block_builder.blocks_to_markdown(blocks_map, cfg["notion_public_id"])
     return md or "(Empty instructions block)"
 
 
@@ -407,7 +419,7 @@ def publish_agent(agent_name: str) -> str:
     cfg = _get_agent_config(agent_name)
     token, user_id = _get_auth()
     result = notion_client.publish_agent(
-        cfg["workflow_id"], cfg["space_id"], token, user_id,
+        cfg["notion_internal_id"], cfg["space_id"], token, user_id,
     )
     return _build_publish_message(agent_name, result, standalone=True)
 
@@ -423,28 +435,28 @@ def discover_agent(workflow_url_or_id: str) -> str:
       - Dashed UUID: 315e7cc7-01d5-8001-8dbe-0092f3224baa
       - Dashless UUID: 315e7cc701d580018dbe0092f3224baa
 
-    Returns the agent's name, workflow_id, space_id, and block_id.
+    Returns the agent's name, notion_internal_id, space_id, and notion_public_id.
     """
     # Extract UUID from URL or raw input
     url_match = re.search(r'/agent/([0-9a-f-]+)', workflow_url_or_id)
     raw_id = url_match.group(1) if url_match else workflow_url_or_id.strip()
-    workflow_id = _to_dashed_uuid(raw_id)
+    notion_internal_id = _to_dashed_uuid(raw_id)
 
     token, user_id = _get_auth()
-    wf = notion_client.get_workflow_record(workflow_id, token, user_id)
+    wf = notion_client.get_workflow_record(notion_internal_id, token, user_id)
 
     name = wf.get("data", {}).get("name", "(unnamed)")
     space_id = wf.get("space_id", "?")
 
     # instructions can be a plain UUID string or {"id": "...", "table": "block", ...}
     instructions = wf.get("data", {}).get("instructions", "?")
-    block_id = instructions["id"] if isinstance(instructions, dict) else instructions
+    notion_public_id = instructions["id"] if isinstance(instructions, dict) else instructions
 
     lines = [
         f"name: {name}",
-        f"workflow_id: {workflow_id}",
+        f"notion_internal_id: {notion_internal_id}",
         f"space_id: {space_id}",
-        f"block_id: {block_id}",
+        f"notion_public_id: {notion_public_id}",
     ]
     return "\n".join(lines)
 
@@ -453,36 +465,36 @@ def discover_agent(workflow_url_or_id: str) -> str:
 @auth_retry
 def register_agent(
     name: str,
-    workflow_id: str,
+    notion_internal_id: str,
     space_id: str,
-    block_id: str,
+    notion_public_id: str,
     label: str = "",
 ) -> str:
     """
     Register a Notion AI agent in agents.yaml.
-    All three UUIDs (workflow_id, space_id, block_id) are required.
+    All three UUIDs (notion_internal_id, space_id, notion_public_id) are required.
     Use discover_agent first to find them.
     """
     # Validate UUIDs
-    workflow_id = _to_dashed_uuid(workflow_id)
+    notion_internal_id = _to_dashed_uuid(notion_internal_id)
     space_id = _to_dashed_uuid(space_id)
-    block_id = _to_dashed_uuid(block_id)
+    notion_public_id = _to_dashed_uuid(notion_public_id)
 
     registry = _load_registry()
     if name in registry:
         return f"Agent '{name}' already exists. Remove it first to re-register."
 
     entry: dict = {
-        "workflow_id": workflow_id,
+        "notion_internal_id": notion_internal_id,
         "space_id": space_id,
-        "block_id": block_id,
+        "notion_public_id": notion_public_id,
     }
     if label:
         entry["label"] = label
 
     registry[name] = entry
     _save_registry(registry)
-    return f"Registered agent '{name}' (workflow: {workflow_id})"
+    return f"Registered agent '{name}' (workflow: {notion_internal_id})"
 
 
 @mcp.tool()
@@ -519,7 +531,7 @@ def _resolve_thread_id(thread: str, token: str, user_id: str | None) -> str:
         pass
 
     # Title search via Notion API
-    matches = notion_client.search_threads(thread, SPACE_ID, token, user_id)
+    matches = notion_client.search_threads(thread, CFG.space_id, token, user_id)
     if not matches:
         raise ValueError(
             f"No conversation found for '{thread}'. "
@@ -604,6 +616,53 @@ def get_conversation(thread: str, format: str = "json") -> str:
     if format == "md":
         return _conversation_to_markdown(convo)
     return json.dumps(convo, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+@auth_retry
+def chat_with_agent(agent_name: str, message: str, thread_id: str | None = None) -> str:
+    """
+    Send a message to a Notion AI agent and trigger a response.
+    
+    agent_name: Registered agent name from agents.yaml.
+    message: The content of the message to send.
+    thread_id: Optional UUID of an existing thread to continue. 
+               If omitted, a new thread will NOT be created automatically by this tool
+               (use list_workflow_threads to find a thread first).
+    
+    Returns the message ID and instructions on how to fetch the response.
+    """
+    with open(AGENTS_YAML) as f:
+        registry = yaml.safe_load(f)
+    
+    cfg = registry.get(agent_name)
+    if not cfg:
+        raise ValueError(f"Agent '{agent_name}' not found in registry.")
+    
+    token, user_id = _get_auth()
+    
+    if not thread_id:
+        # For now, require an existing thread to prevent ambiguous new thread creation
+        threads = notion_client.list_workflow_threads(cfg['notion_internal_id'], cfg['space_id'], token, user_id, limit=1)
+        if not threads:
+            raise ValueError(f"No existing threads found for agent '{agent_name}'. Please initiate a chat in the UI first.")
+        thread_id = threads[0]['id']
+        print(f"Continuing most recent thread: {thread_id}", file=sys.stderr)
+
+    msg_id = notion_client.send_agent_message(
+        thread_id=thread_id,
+        space_id=cfg['space_id'],
+        notion_internal_id=cfg['notion_internal_id'],
+        content=message,
+        token_v2=token,
+        user_id=user_id
+    )
+    
+    return (
+        f"Message sent (ID: {msg_id}) to thread {thread_id}.\n"
+        f"The agent inference has been triggered. Wait a few seconds, then call:\n"
+        f"get_conversation(thread='{thread_id}', format='md')"
+    )
 
 
 def _get_collection_prop_names(collection_id: str) -> dict[str, str]:
@@ -733,7 +792,7 @@ def get_agent_triggers(agent: str = "all") -> str:
     token, user_id = _get_auth()
 
     if agent == "all":
-        agents = notion_client.get_all_workspace_agents(SPACE_ID, token, user_id)
+        agents = notion_client.get_all_workspace_agents(CFG.space_id, token, user_id)
         if not agents:
             return "No agents found in workspace."
         lines = []
@@ -745,7 +804,7 @@ def get_agent_triggers(agent: str = "all") -> str:
 
     # Single agent from registry
     cfg = _get_agent_config(agent)
-    wf = notion_client.get_workflow_record(cfg["workflow_id"], token, user_id)
+    wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
     triggers = wf.get("data", {}).get("triggers", [])
     name = wf.get("data", {}).get("name", agent)
     trigger_lines = _format_agent_triggers(triggers)
@@ -792,9 +851,19 @@ def get_db_automations(db: str) -> str:
             ppe = event["pagePropertiesEdited"]
             filter_type = ppe.get("type", "all")
             filters = ppe.get("all", []) or ppe.get("some", [])
-            props = [f"{_prop_name(f['property'])} ({f['filter']['operator']})" for f in filters]
+            filter_parts = []
+            for f in filters:
+                filt = f.get("filter", {})
+                op = filt.get("operator", "?")
+                vals = filt.get("value", [])
+                val_names = [v.get("value", v.get("id", "?")) for v in vals if isinstance(v, dict)]
+                prop_label = _prop_name(f["property"])
+                if val_names:
+                    filter_parts.append(f"{prop_label} {op} [{', '.join(val_names)}]")
+                else:
+                    filter_parts.append(f"{prop_label} ({op})")
             qualifier = f" [{filter_type}]" if filter_type != "all" else ""
-            lines.append(f"   Trigger: pagePropertiesEdited{qualifier} — {', '.join(props)}")
+            lines.append(f"   Trigger: pagePropertiesEdited{qualifier} — {'; '.join(filter_parts)}")
         elif event.get("pagesAdded"):
             lines.append("   Trigger: pagesAdded")
         else:
@@ -806,8 +875,17 @@ def get_db_automations(db: str) -> str:
             lines.append(f"     [{act['type']}]  id={act['id']}")
             config = act.get("config", {})
             if config.get("values"):
-                props_written = [_prop_name(p) for p in config["values"].keys()]
-                lines.append(f"       writes properties: {props_written}")
+                val_parts = []
+                for pid, vdef in config["values"].items():
+                    pname = _prop_name(pid)
+                    raw = vdef.get("value", {}).get("value", "")
+                    if isinstance(raw, list) and raw:
+                        # Notion rich-text style: [["text"]]
+                        display = raw[0][0] if isinstance(raw[0], list) else str(raw[0])
+                    else:
+                        display = str(raw) if raw else "?"
+                    val_parts.append(f"{pname} ← {display}")
+                lines.append(f"       sets: {', '.join(val_parts)}")
             elif config:
                 lines.append(f"       config: {json.dumps(config)[:120]}")
         lines.append("")
@@ -816,14 +894,8 @@ def get_db_automations(db: str) -> str:
 
 
 def _get_notion_api_client() -> notion_api.NotionAPIClient:
-    """Get a public Notion API client using NOTION_TOKEN."""
-    token = os.environ.get("NOTION_TOKEN")
-    if not token:
-        raise RuntimeError(
-            "NOTION_TOKEN environment variable required for database queries. "
-            "Set it to a Notion integration token."
-        )
-    return notion_api.NotionAPIClient(token)
+    """Get a public Notion API client using CFG.notion_token."""
+    return notion_api.NotionAPIClient(CFG.notion_token)
 
 
 def _format_property_value(prop: dict) -> str:
@@ -966,7 +1038,7 @@ def get_agent_tools(agent_name: str) -> str:
     """
     cfg = _get_agent_config(agent_name)
     token, user_id = _get_auth()
-    result = notion_client.get_agent_modules(cfg["workflow_id"], token, user_id)
+    result = notion_client.get_agent_modules(cfg["notion_internal_id"], token, user_id)
 
     lines = [f"Agent: {cfg.get('label', agent_name)}"]
     model = result.get("model", {})
@@ -1053,7 +1125,7 @@ def add_agent_mcp_server(
     """
     cfg = _get_agent_config(agent_name)
     token, user_id = _get_auth()
-    wf = notion_client.get_workflow_record(cfg["workflow_id"], token, user_id)
+    wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
     modules = wf.get("data", {}).get("modules", [])
 
     # Check for duplicate
@@ -1073,13 +1145,13 @@ def add_agent_mcp_server(
     }
     modules.append(new_module)
     notion_client.update_agent_modules(
-        cfg["workflow_id"], cfg["space_id"], modules, token, user_id,
+        cfg["notion_internal_id"], cfg["space_id"], modules, token, user_id,
     )
 
     msg = f"Added MCP server '{server_name}' ({server_url}) to {agent_name}."
     if publish:
         result = notion_client.publish_agent(
-            cfg["workflow_id"], cfg["space_id"], token, user_id,
+            cfg["notion_internal_id"], cfg["space_id"], token, user_id,
         )
         msg += f" {_build_publish_message(agent_name, result)}"
     return msg
@@ -1101,7 +1173,7 @@ def remove_agent_mcp_server(
     """
     cfg = _get_agent_config(agent_name)
     token, user_id = _get_auth()
-    wf = notion_client.get_workflow_record(cfg["workflow_id"], token, user_id)
+    wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
     modules = wf.get("data", {}).get("modules", [])
 
     original_count = len(modules)
@@ -1115,13 +1187,13 @@ def remove_agent_mcp_server(
         return f"No MCP server named '{server_name}' found on {agent_name}. Current: {mcp_names}"
 
     notion_client.update_agent_modules(
-        cfg["workflow_id"], cfg["space_id"], modules, token, user_id,
+        cfg["notion_internal_id"], cfg["space_id"], modules, token, user_id,
     )
 
     msg = f"Removed MCP server '{server_name}' from {agent_name}."
     if publish:
         result = notion_client.publish_agent(
-            cfg["workflow_id"], cfg["space_id"], token, user_id,
+            cfg["notion_internal_id"], cfg["space_id"], token, user_id,
         )
         msg += f" {_build_publish_message(agent_name, result)}"
     return msg
@@ -1161,14 +1233,14 @@ def set_agent_model(
     cfg = _get_agent_config(agent_name)
     token, user_id = _get_auth()
     notion_client.update_agent_model(
-        cfg["workflow_id"], cfg["space_id"], model_type, token, user_id,
+        cfg["notion_internal_id"], cfg["space_id"], model_type, token, user_id,
     )
     display = notion_client.MODEL_NAMES.get(model_type, model_type)
     msg = f"Set {agent_name} model to {display} ({model_type})."
 
     if publish:
         result = notion_client.publish_agent(
-            cfg["workflow_id"], cfg["space_id"], token, user_id,
+            cfg["notion_internal_id"], cfg["space_id"], token, user_id,
         )
         msg += f" {_build_publish_message(agent_name, result)}"
     return msg
@@ -1203,8 +1275,8 @@ def create_agent(
             raise ValueError(f"Multiple spaces found. Provide space_id. Available: {space_list}")
 
     result = notion_client.create_agent(space_id, name, icon, token, user_id)
-    wf_id = result["workflow_id"]
-    block_id = result["block_id"]
+    wf_id = result["notion_internal_id"]
+    notion_public_id = result["notion_public_id"]
 
     # Always add to sidebar
     notion_client.add_agent_to_sidebar(space_id, wf_id, token, user_id)
@@ -1212,15 +1284,15 @@ def create_agent(
     # Initial publish (v1)
     notion_client.publish_agent(wf_id, space_id, token, user_id, archive_existing=False)
 
-    msg = f"Created agent '{name}' (workflow: {wf_id}, instructions: {block_id})."
+    msg = f"Created agent '{name}' (workflow: {wf_id}, instructions: {notion_public_id})."
 
     if register:
         key = _name_to_key(name)
         registry = _load_registry()
         registry[key] = {
-            "workflow_id": wf_id,
+            "notion_internal_id": wf_id,
             "space_id": space_id,
-            "block_id": block_id,
+            "notion_public_id": notion_public_id,
             "label": name,
         }
         _save_registry(registry)
@@ -1238,7 +1310,7 @@ def get_agent_config_raw(agent_name: str) -> str:
     """
     cfg = _get_agent_config(agent_name)
     token, user_id = _get_auth()
-    wf = notion_client.get_workflow_record(cfg["workflow_id"], token, user_id)
+    wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
     return json.dumps(wf, indent=2, ensure_ascii=False)
 
 
@@ -1264,13 +1336,13 @@ def set_agent_modules(
     token, user_id = _get_auth()
 
     notion_client.update_agent_modules(
-        cfg["workflow_id"], cfg["space_id"], modules, token, user_id,
+        cfg["notion_internal_id"], cfg["space_id"], modules, token, user_id,
     )
 
     msg = f"Bulk-updated modules for {agent_name}."
     if publish:
         result = notion_client.publish_agent(
-            cfg["workflow_id"], cfg["space_id"], token, user_id,
+            cfg["notion_internal_id"], cfg["space_id"], token, user_id,
         )
         msg += f" {_build_publish_message(agent_name, result)}"
     return msg
@@ -1311,7 +1383,7 @@ def set_agent_config_raw(
     token, user_id = _get_auth()
 
     ops = [{
-        "pointer": {"table": "workflow", "id": cfg["workflow_id"], "spaceId": cfg["space_id"]},
+        "pointer": {"table": "workflow", "id": cfg["notion_internal_id"], "spaceId": cfg["space_id"]},
         "path": ["data"],
         "command": "update",
         "args": new_data
@@ -1321,7 +1393,7 @@ def set_agent_config_raw(
     msg = f"Bulk-updated configuration for {agent_name}."
     if publish:
         result = notion_client.publish_agent(
-            cfg["workflow_id"], cfg["space_id"], token, user_id,
+            cfg["notion_internal_id"], cfg["space_id"], token, user_id,
         )
         msg += f" {_build_publish_message(agent_name, result)}"
     return msg
@@ -1331,7 +1403,7 @@ def set_agent_config_raw(
 @auth_retry
 def grant_resource_access(
     agent_name: str,
-    block_id: str,
+    notion_public_id: str,
     role: str = "editor",
 ) -> str:
     """
@@ -1339,18 +1411,18 @@ def grant_resource_access(
     Performs the full handshake required for backend provisioning.
 
     agent_name: Registered agent name.
-    block_id: The UUID of the page or database.
+    notion_public_id: The UUID of the page or database.
     role: 'editor' (read/write) or 'reader' (read-only).
     """
     cfg = _get_agent_config(agent_name)
     token, user_id = _get_auth()
 
     result = notion_client.grant_agent_resource_access(
-        cfg["workflow_id"], cfg["space_id"], block_id, role,
+        cfg["notion_internal_id"], cfg["space_id"], notion_public_id, role,
         token, user_id,
     )
 
-    msg = f"Granted {role} access to {block_id} for {agent_name}."
+    msg = f"Granted {role} access to {notion_public_id} for {agent_name}."
     msg += f" {_build_publish_message(agent_name, result)}"
     return msg
 

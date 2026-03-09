@@ -18,6 +18,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import cookie_extract
 import notion_client
+import config
+
+# Use config instance
+CFG = config.get_config()
 
 AGENTS_YAML = os.path.join(os.path.dirname(__file__), "agents.yaml")
 
@@ -25,7 +29,8 @@ AGENTS_YAML = os.path.join(os.path.dirname(__file__), "agents.yaml")
 def get_auth() -> tuple[str, str]:
     """Return (token_v2, user_id). Exits on failure."""
     try:
-        token = cookie_extract.get_token_v2()
+        # Use config token if available, otherwise cookie_extract
+        token = CFG.notion_token if CFG and CFG.notion_token else cookie_extract.get_token_v2()
         user_id = cookie_extract.get_user_id()
     except (FileNotFoundError, ValueError) as e:
         print(f"Auth error: {e}", file=sys.stderr)
@@ -38,7 +43,7 @@ def get_auth() -> tuple[str, str]:
     return token, user_id
 
 
-def register_agent(name: str, workflow_id: str, space_id: str, block_id: str) -> None:
+def register_agent(name: str, notion_internal_id: str, space_id: str, notion_public_id: str) -> None:
     """Add or update an agent entry in agents.yaml."""
     registry = {}
     if os.path.exists(AGENTS_YAML):
@@ -46,9 +51,9 @@ def register_agent(name: str, workflow_id: str, space_id: str, block_id: str) ->
             registry = yaml.safe_load(f) or {}
 
     registry[name] = {
-        "workflow_id": workflow_id,
+        "notion_internal_id": notion_internal_id,
         "space_id": space_id,
-        "block_id": block_id
+        "notion_public_id": notion_public_id
     }
 
     with open(AGENTS_YAML, "w") as f:
@@ -67,7 +72,7 @@ def main() -> None:
     token, user_id = get_auth()
 
     # ... (space discovery logic same as before) ...
-    space_id = args.space_id
+    space_id = args.space_id or CFG.space_id
     if not space_id:
         spaces = notion_client.get_user_spaces(token)
         if len(spaces) == 1:
@@ -84,11 +89,11 @@ def main() -> None:
 
     print(f"Creating agent '{args.name}'...")
     result = notion_client.create_agent(space_id, args.name, args.icon, token, user_id)
-    wf_id = result["workflow_id"]
-    block_id = result["block_id"]
+    wf_id = result["notion_internal_id"]
+    notion_public_id = result["notion_public_id"]
 
     print(f"✓ Created workflow: {wf_id}")
-    print(f"✓ Created instruction block: {block_id}")
+    print(f"✓ Created instruction block: {notion_public_id}")
 
     if not args.no_sidebar:
         print("Adding to sidebar...")
@@ -100,7 +105,7 @@ def main() -> None:
     notion_client.publish_agent(wf_id, space_id, token, user_id, archive_existing=False)
     print("✓ Published")
 
-    register_agent(args.name, wf_id, space_id, block_id)
+    register_agent(args.name, wf_id, space_id, notion_public_id)
     print(f"\nSuccess! Agent '{args.name}' is ready.")
     print(f"Manage it with: python cli/update_agent.py \"{args.name}\" --dump")
 

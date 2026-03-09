@@ -21,15 +21,17 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from . import notion_api
+    from . import notion_api, config
 except ImportError:
-    import notion_api
+    import notion_api, config
 
-WORK_ITEMS_DB_ID = "daeb64d4-e5a8-4a7b-b0dc-7555cbc3def6"
-CHATSEARCH_PROJECT_ID = "f7cca113-ad21-4261-a170-4a88441a0e66"
+# Use config instance
+CFG = config.get_config()
+
 DEFAULT_PROJECT_LABEL = "chatsearch"
 DEFAULT_STATE_PATH = Path(".cache/cycle_bridge_state.json")
 DATASET_SOURCE = "chatsearch.cycle_detections"
+
 
 
 @dataclass(frozen=True)
@@ -67,20 +69,21 @@ class OracleConfig:
 @dataclass(frozen=True)
 class NotionConfig:
     token: str
-    work_items_db_id: str = WORK_ITEMS_DB_ID
-    project_id: str | None = CHATSEARCH_PROJECT_ID
+    work_items_db_id: str = CFG.work_items_db_id
+    project_id: str | None = CFG.chatsearch_project_id
     project_label: str = DEFAULT_PROJECT_LABEL
     dispatch_via: str | None = None
 
     @classmethod
     def from_env(cls) -> "NotionConfig":
         return cls(
-            token=os.environ["NOTION_TOKEN"],
-            work_items_db_id=os.environ.get("WORK_ITEMS_DB_ID", WORK_ITEMS_DB_ID),
-            project_id=os.environ.get("WORK_ITEMS_PROJECT_ID", CHATSEARCH_PROJECT_ID) or None,
+            token=CFG.notion_token,
+            work_items_db_id=os.environ.get("WORK_ITEMS_DB_ID", CFG.work_items_db_id),
+            project_id=os.environ.get("WORK_ITEMS_PROJECT_ID", CFG.chatsearch_project_id) or None,
             project_label=os.environ.get("WORK_ITEMS_PROJECT_LABEL", DEFAULT_PROJECT_LABEL),
             dispatch_via=os.environ.get("CYCLE_BRIDGE_DISPATCH_VIA") or None,
         )
+
 
 
 @dataclass(frozen=True)
