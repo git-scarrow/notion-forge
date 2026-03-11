@@ -39,7 +39,8 @@ cli/.venv/bin/python -c "import sys; sys.path.insert(0,'cli'); import notion_cli
 
 - Entry: `cli/mcp_server.py`, registered in `.mcp.json`
 - Server name: `notion-agents`
-- Tools: `list_agents`, `list_workspace_agents`, `sync_registry`, `dump_agent`, `update_agent`, `publish_agent`, `discover_agent`, `register_agent`, `remove_agent`, `get_agent_tools`, `add_agent_mcp_server`, `remove_agent_mcp_server`, `set_agent_model`
+- Tools: `list_agents`, `list_workspace_agents`, `sync_registry`, `dump_agent`, `update_agent`, `publish_agent`, `discover_agent`, `register_agent`, `remove_agent`, `get_agent_tools`, `add_agent_mcp_server`, `remove_agent_mcp_server`, `set_agent_model`, `chat_with_agent`, `get_conversation`, `query_database`, `get_agent_triggers`, `get_db_automations`, `grant_resource_access`, `get_dispatchable_items`, `build_dispatch_packet`, `stamp_dispatch_consumed`
+- `chat_with_agent(agent_name, message, wait=True)` sends a message and returns the agent's response. Requires at least one UI-created thread per agent (programmatic thread creation is not yet supported by Notion's inference backend).
 - `sync_registry` auto-populates `cli/agents.yaml` from the live workspace (additive-only, safe to re-run)
 - See `~/.agents/skills/notion-agent-mcp/SKILL.md` for full API reference
 
@@ -56,7 +57,7 @@ Notion databases have two distinct UUIDs. Using the wrong one will result in a 4
 
 | File | Purpose |
 |---|---|
-| `cli/mcp_server.py` | MCP server (13 tools) |
+| `cli/mcp_server.py` | MCP server (27 tools) |
 | `cli/notion_client.py` | Internal Notion API client |
 | `cli/block_builder.py` | Markdown ↔ Notion blocks (Python) |
 | `cli/cookie_extract.py` | Firefox `token_v2` auth |
@@ -64,4 +65,7 @@ Notion databases have two distinct UUIDs. Using the wrong one will result in a 4
 | `agent-manager/block-builder.js` | Markdown ↔ Notion blocks (JS, used by extension) |
 | `background/service-worker.js` | Extension: chat interception + agent write API |
 | `popup/popup.js` | Extension: UI thin client |
+| `cli/dispatch.py` | Dispatch adapter (v1.1 contract) |
+| `cli/contracts/` | JSON schemas + configs for dispatch contract |
+| `cli/test_dispatch.py` | Dispatch adapter unit tests |
 | `.mcp.json` | MCP server registration |

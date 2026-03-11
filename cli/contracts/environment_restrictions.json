@@ -1,0 +1,21 @@
+{
+  "version": "1.1",
+  "environments": {
+    "production": {
+      "allowed_lanes": ["sentinel-deploy", "ops"],
+      "requires_audit": true
+    },
+    "staging": {
+      "allowed_lanes": ["sentinel-deploy", "ops", "dev", "sentinel", "reviewer"],
+      "requires_audit": false
+    },
+    "dev": {
+      "allowed_lanes": "*",
+      "requires_audit": false
+    },
+    "sandbox": {
+      "allowed_lanes": "*",
+      "requires_audit": false
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "progress_event.schema.json",
+  "title": "Progress Event",
+  "description": "Lifecycle event from an execution plane back to the Lab.",
+  "type": "object",
+  "required": ["version", "run_id", "work_item_id", "event_type", "timestamp"],
+  "properties": {
+    "version":       {"type": "string", "const": "1.1"},
+    "run_id":        {"type": "string", "format": "uuid"},
+    "work_item_id":  {"type": "string", "format": "uuid"},
+    "execution_lane": {"type": "string"},
+    "event_type": {
+      "type": "string",
+      "enum": ["started", "heartbeat", "checkpoint", "final"]
+    },
+    "timestamp":     {"type": "string", "format": "date-time"},
+    "message":       {"type": ["string", "null"]},
+    "progress_pct":  {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+    "checkpoint_data": {"type": ["object", "null"]}
+  },
+  "additionalProperties": false
+}

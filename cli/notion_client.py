@@ -106,8 +106,8 @@ def get_user_spaces(token_v2: str) -> list[dict]:
     List all spaces (workspaces) the user belongs to.
     Uses loadUserContent which is more reliable than getSpaces.
     """
-    data = _post("loadUserContent", {}, token_v2)
-    
+    data = _normalize_record_map(_post("loadUserContent", {}, token_v2))
+
     record_map = data.get("recordMap", {})
     spaces_map = record_map.get("space", {})
     
@@ -137,8 +137,10 @@ def get_all_workspace_agents(space_id: str, token_v2: str,
       {name, notion_internal_id, space_id, notion_public_id}
     """
     # Step 1: getBots — list all workflow-type bots in the space
-    bots_data = _post("getBots", {"table": "space", "id": space_id, "type": "workflow"},
-                      token_v2, user_id)
+    bots_data = _normalize_record_map(
+        _post("getBots", {"table": "space", "id": space_id, "type": "workflow"},
+              token_v2, user_id)
+    )
     bot_records = bots_data.get("recordMap", {}).get("bot", {})
 
     # Collect unique notion_internal_ids, keeping highest version per workflow
@@ -220,7 +222,9 @@ def get_block_children(notion_public_id: str, space_id: str,
         "chunkNumber": 0,
         "verticalColumns": False,
     }
-    data = _post("loadPageChunk", payload, token_v2, user_id)
+    data = _normalize_record_map(
+        _post("loadPageChunk", payload, token_v2, user_id)
+    )
 
     record_map = data.get("recordMap", {})
     blocks = record_map.get("block", {})
@@ -244,7 +248,9 @@ def get_block_tree(notion_public_id: str, space_id: str,
             "chunkNumber": 0,
             "verticalColumns": False,
         }
-        data = _post("loadPageChunk", payload, token_v2, user_id)
+        data = _normalize_record_map(
+            _post("loadPageChunk", payload, token_v2, user_id)
+        )
         if first_response is None:
             first_response = data
         merged_blocks.update(data.get("recordMap", {}).get("block", {}))
@@ -286,7 +292,9 @@ def get_db_automations(db_page_id: str, token_v2: str,
         "chunkNumber": 0,
         "verticalColumns": False,
     }
-    data = _post("loadPageChunk", payload, token_v2, user_id)
+    data = _normalize_record_map(
+        _post("loadPageChunk", payload, token_v2, user_id)
+    )
     record_map = data.get("recordMap", {})
 
     raw_automations = record_map.get("automation", {})
@@ -365,9 +373,28 @@ def _record_value(entry: dict | None) -> dict:
     if not isinstance(value, dict):
         return {}
     nested = value.get("value")
-    if isinstance(nested, dict):
+    if isinstance(nested, dict) and "id" in nested:
         return nested
     return value
+
+
+def _normalize_record_map(data: dict) -> dict:
+    """Normalize all recordMap tables: unwrap double-nested value.value -> value.
+
+    The Notion API now wraps recordMap entries as {value: {value: {...data}, role: ...}}.
+    This normalizes to the old {value: {...data}} format so downstream .get("value", {})
+    calls work unchanged.
+    """
+    for table_records in data.get("recordMap", {}).values():
+        if not isinstance(table_records, dict):
+            continue
+        for rid in table_records:
+            entry = table_records[rid]
+            if isinstance(entry, dict):
+                unwrapped = _record_value(entry)
+                if unwrapped:
+                    table_records[rid] = {"value": unwrapped}
+    return data
 
 
 # ── Op collectors (build ops without sending) ────────────────────────────────
@@ -992,7 +1019,7 @@ def search_threads(query: str, space_id: str, token_v2: str,
         "sort": "Relevance",
         "limit": 20,
     }
-    data = _post("search", payload, token_v2, user_id)
+    data = _normalize_record_map(_post("search", payload, token_v2, user_id))
     record_map = data.get("recordMap", {})
     thread_rm = record_map.get("thread", {})
     matches = []
@@ -1034,7 +1061,9 @@ def list_workflow_threads(notion_internal_id: str, space_id: str,
         if cursor:
             payload["cursor"] = cursor
 
-        data = _post("getInferenceTranscriptsForWorkflow", payload, token_v2, user_id)
+        data = _normalize_record_map(
+            _post("getInferenceTranscriptsForWorkflow", payload, token_v2, user_id)
+        )
         transcripts = data.get("transcripts") or []
         transcript_by_id = {
             item.get("id"): item for item in transcripts
@@ -1516,8 +1545,8 @@ def add_agent_to_sidebar(space_id: str, notion_internal_id: str,
     Append a workflow ID to the user's sidebar (space_view.settings.sidebar_notion_internal_ids).
     """
     # 1. Find space_view ID
-    data = _post("loadUserContent", {}, token_v2)
-    
+    data = _normalize_record_map(_post("loadUserContent", {}, token_v2))
+
     space_view_id = None
     for sv_id, sv_rec in data.get("recordMap", {}).get("space_view", {}).items():
         if sv_rec.get("value", {}).get("space_id") == space_id:
@@ -1537,6 +1566,57 @@ def add_agent_to_sidebar(space_id: str, notion_internal_id: str,
     send_ops(space_id, ops, token_v2, user_id, user_action="sidebarWorkflowsActions.addSidebarWorkflow")
 
 
+def create_workflow_thread(notion_internal_id: str, space_id: str,
+                           token_v2: str, user_id: str | None = None) -> str:
+    """
+    Create a new empty thread for a workflow agent.
+    Fetches the workflow's published_artifact_pointer to populate the
+    thread's data block (required for inference to trigger).
+    Returns the new thread ID.
+    """
+    thread_id = str(uuid.uuid4())
+    now_ms = int(time.time() * 1000)
+
+    # Fetch the workflow record to get the artifact pointer
+    wf = get_workflow_record(notion_internal_id, token_v2, user_id)
+    wf_data = wf.get("data") or {}
+    artifact_ptr = wf_data.get("published_artifact_pointer")
+
+    thread_data: dict[str, Any] = {
+        "workflow_id": notion_internal_id,
+    }
+    if artifact_ptr:
+        thread_data["workflow_artifact_pointer"] = artifact_ptr
+
+    thread_args = {
+        "id": thread_id,
+        "version": 1,
+        "type": "workflow",
+        "parent_id": notion_internal_id,
+        "parent_table": "workflow",
+        "space_id": space_id,
+        "alive": True,
+        "messages": [],
+        "data": thread_data,
+        "created_source": "workflows",
+        "created_time": now_ms,
+        "created_by_id": user_id,
+        "created_by_table": "notion_user",
+        "updated_time": now_ms,
+        "updated_by_id": user_id,
+        "updated_by_table": "notion_user",
+    }
+    ops = [{
+        "pointer": {"table": "thread", "id": thread_id, "spaceId": space_id},
+        "command": "set",
+        "path": [],
+        "args": thread_args,
+    }]
+    send_ops(space_id, ops, token_v2, user_id,
+             user_action="WorkflowActions.createNewThread")
+    return thread_id
+
+
 def send_agent_message(thread_id: str, space_id: str, notion_internal_id: str, content: str,
                        token_v2: str, user_id: str | None = None,
                        model: str = "avocado-froyo-medium",
@@ -1548,13 +1628,13 @@ def send_agent_message(thread_id: str, space_id: str, notion_internal_id: str, c
     msg_id = str(uuid.uuid4())
     trace_id = str(uuid.uuid4())
     now_ms = int(time.time() * 1000)
-    
+
     # Format timestamp exactly as UI: 2026-03-07T16:35:44.690-05:00
     now_dt = datetime.fromtimestamp(now_ms/1000).astimezone()
     offset_str = now_dt.strftime("%z")
     offset_formatted = f"{offset_str[:3]}:{offset_str[3:]}"
     now_iso = now_dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + offset_formatted
-    
+
     # 1. Human message transaction
     msg_args = {
         "id": msg_id,
@@ -1573,25 +1653,25 @@ def send_agent_message(thread_id: str, space_id: str, notion_internal_id: str, c
         "created_by_id": user_id,
         "created_by_table": "notion_user"
     }
-    
+
     ops = [
         {"pointer": {"table": "thread_message", "id": msg_id, "spaceId": space_id}, "command": "set", "path": [], "args": msg_args},
         {"pointer": {"table": "thread", "id": thread_id, "spaceId": space_id}, "command": "listAfterMulti", "path": ["messages"], "args": {"ids": [msg_id]}},
         {"pointer": {"table": "thread", "id": thread_id, "spaceId": space_id}, "command": "update", "path": [], "args": {"updated_time": now_ms, "updated_by_id": user_id, "updated_by_table": "notion_user"}}
     ]
-    
+
     send_ops(space_id, ops, token_v2, user_id, user_action="WorkflowActions.addStepsToExistingThreadAndRun", dry_run=dry_run)
-    
+
     if dry_run:
         return msg_id
 
-    # 2. Trigger inference — payload matched from HAR capture of real Dad Lab Bot session
+    # 2. Trigger inference
     inference_payload = {
         "traceId": trace_id,
         "spaceId": space_id,
         "threadId": thread_id,
         "createThread": False,
-        "generateTitle": False,
+        "generateTitle": True,
         "threadType": "workflow",
         "isPartialTranscript": True,
         "asPatchResponse": True,
@@ -1693,6 +1773,40 @@ def send_agent_message(thread_id: str, space_id: str, notion_internal_id: str, c
         pass
 
     return msg_id
+
+
+def wait_for_agent_response(thread_id: str, after_msg_id: str,
+                             token_v2: str, user_id: str | None = None,
+                             timeout: int = 120, poll_interval: int = 3) -> str | None:
+    """
+    Poll a thread until the agent produces a response after after_msg_id.
+    Returns the assistant's response text, or None on timeout.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(poll_interval)
+        try:
+            conv = get_thread_conversation(thread_id, token_v2, user_id)
+        except Exception:
+            continue
+        turns = conv.get("turns") or conv.get("messages") or []
+        if not turns:
+            continue
+        # Find the user message, then check if there's an assistant turn after it
+        found_user = False
+        for turn in turns:
+            turn_id = turn.get("msgId") or turn.get("id") or turn.get("messageId")
+            if turn_id == after_msg_id:
+                found_user = True
+                continue
+            if found_user and turn.get("role") in ("assistant", "agent"):
+                # Extract text content
+                content = turn.get("content") or turn.get("text") or ""
+                if isinstance(content, list):
+                    content = "\n".join(str(c) for c in content)
+                if content.strip():
+                    return content.strip()
+    return None
 
 
 # ── Publish ───────────────────────────────────────────────────────────────────

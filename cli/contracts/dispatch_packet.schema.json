@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dispatch_packet.schema.json",
+  "title": "Dispatch Packet",
+  "description": "A validated work item ready for execution by an execution plane.",
+  "type": "object",
+  "required": [
+    "version", "run_id", "work_item_id", "work_item_name",
+    "objective", "dispatch_via", "execution_lane", "environment",
+    "type", "created_at", "constraints"
+  ],
+  "properties": {
+    "version":        {"type": "string", "const": "1.1"},
+    "run_id":         {"type": "string", "format": "uuid"},
+    "work_item_id":   {"type": "string", "format": "uuid"},
+    "work_item_name": {"type": "string", "minLength": 1},
+    "project_name":   {"type": ["string", "null"]},
+    "project_id":     {"type": ["string", "null"], "format": "uuid"},
+    "objective":      {"type": "string", "minLength": 1},
+    "kill_condition":  {"type": ["string", "null"]},
+    "dispatch_via":   {
+      "type": "string",
+      "enum": ["Claude", "Claude Code", "Gemini", "Cursor", "Codex", "Copilot", "Antigravity", "Manual"]
+    },
+    "execution_lane": {
+      "type": "string",
+      "enum": [
+        "main", "planner", "coder", "reviewer", "dev",
+        "sentinel", "sentinel-deploy", "scout",
+        "bayview", "bayview-thinking", "bayview-tuning",
+        "thinker", "ops"
+      ]
+    },
+    "environment": {
+      "type": "string",
+      "enum": ["dev", "staging", "production", "sandbox"]
+    },
+    "branch":          {"type": ["string", "null"]},
+    "type": {
+      "type": "string",
+      "enum": ["Gauntlet", "Measurement Track", "Literature Survey", "Design Spec", "Feasibility Analysis", "Other"]
+    },
+    "prompt_notes":    {"type": ["string", "null"]},
+    "github_issue_url": {"type": ["string", "null"], "format": "uri"},
+    "created_at":      {"type": "string", "format": "date-time"},
+    "constraints": {
+      "type": "object",
+      "required": ["can_code", "can_browse", "can_deploy", "max_timeout_s"],
+      "properties": {
+        "can_code":      {"type": "boolean"},
+        "can_browse":    {"type": "boolean"},
+        "can_deploy":    {"type": "boolean"},
+        "write_scope":   {"type": "string"},
+        "max_timeout_s": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,14 @@
+{
+  "version": "1.1",
+  "patterns": [
+    {"label": "API key",              "regex": "sk-[A-Za-z0-9]{20,}"},
+    {"label": "GitHub PAT",           "regex": "ghp_[A-Za-z0-9]{36}"},
+    {"label": "GitHub app token",     "regex": "ghs_[A-Za-z0-9]{36}"},
+    {"label": "GitHub OAuth token",   "regex": "gho_[A-Za-z0-9]{36}"},
+    {"label": "Gateway token",        "regex": "GATEWAY_AUTH_TOKEN="},
+    {"label": "Credential path",      "regex": "/run/agenix/"},
+    {"label": "Bearer token",         "regex": "Bearer [A-Za-z0-9._-]+"},
+    {"label": "DB connection string", "regex": "postgres(?:ql)?://[^\\s]+@[^\\s]+"}
+  ],
+  "mandatory_lanes": ["sentinel-deploy", "ops", "bayview"]
+}

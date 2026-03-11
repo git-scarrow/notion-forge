@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "final_return.schema.json",
+  "title": "Final Return Payload",
+  "description": "Structured result from an execution plane back to the Lab.",
+  "type": "object",
+  "required": [
+    "version", "run_id", "work_item_id", "work_item_name",
+    "lane", "status", "raw_output", "summary", "duration_ms", "model"
+  ],
+  "properties": {
+    "version":         {"type": "string", "const": "1.1"},
+    "run_id":          {"type": "string", "format": "uuid"},
+    "work_item_id":    {"type": "string", "format": "uuid"},
+    "work_item_name":  {"type": "string"},
+    "lane":            {"type": "string"},
+    "status": {
+      "type": "string",
+      "enum": ["ok", "error", "gated", "timeout"]
+    },
+    "verdict": {
+      "type": ["string", "null"],
+      "enum": ["PASS", "FAIL", "INCONCLUSIVE", "OBSERVATIONS", null]
+    },
+    "metrics":         {"type": ["object", "null"]},
+    "raw_output":      {"type": "string"},
+    "summary":         {"type": "string", "maxLength": 500},
+    "error":           {"type": ["string", "null"]},
+    "tool_calls":      {
+      "type": ["array", "null"],
+      "items": {"type": "object"}
+    },
+    "duration_ms":     {"type": "integer", "minimum": 0},
+    "model":           {"type": "string"},
+    "artifacts": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "required": ["type", "description"],
+        "properties": {
+          "type":          {"type": "string"},
+          "path_or_url":   {"type": "string"},
+          "description":   {"type": "string"}
+        }
+      }
+    },
+    "files_changed":   {
+      "type": ["array", "null"],
+      "items": {"type": "string"}
+    },
+    "commit_sha":      {"type": ["string", "null"]},
+    "pr_url":          {"type": ["string", "null"], "format": "uri"}
+  },
+  "additionalProperties": false,
+  "if": {
+    "properties": {"status": {"const": "ok"}}
+  },
+  "then": {
+    "required": ["verdict"]
+  }
+}

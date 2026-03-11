@@ -1,0 +1,20 @@
+{
+  "version": "1.1",
+  "gauntlet": {
+    "PASS":          {"status": "Passed",             "verdict": "Passed"},
+    "FAIL":          {"status": "Kill Condition Met",  "verdict": "Killed"},
+    "INCONCLUSIVE":  {"status": "Done",                "verdict": "Inconclusive"},
+    "OBSERVATIONS":  null
+  },
+  "non_gauntlet": {
+    "PASS":          {"status": "Done",  "verdict": "Passed"},
+    "FAIL":          {"status": "Done",  "verdict": "Killed"},
+    "INCONCLUSIVE":  {"status": "Done",  "verdict": "Inconclusive"},
+    "OBSERVATIONS":  {"status": "Done",  "verdict": null}
+  },
+  "error_states": {
+    "error":   {"status": "Blocked", "verdict": null},
+    "gated":   {"status": "Blocked", "verdict": null},
+    "timeout": {"status": "Blocked", "verdict": null}
+  }
+}

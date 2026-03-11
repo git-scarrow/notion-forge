@@ -113,6 +113,9 @@ class NotionAPIClient:
     def update_page(self, page_id: str, properties: dict[str, Any]) -> dict[str, Any]:
         return self._request("PATCH", f"pages/{page_id}", {"properties": properties})
 
+    def retrieve_page(self, page_id: str) -> dict[str, Any]:
+        return self._request("GET", f"pages/{page_id}")
+
     def atomic_consume(
         self,
         page_id: str,
@@ -147,6 +150,24 @@ class NotionAPIClient:
                 f"blocks/{notion_public_id}/children",
                 {"children": chunk},
             )
+
+    def list_block_children(
+        self,
+        notion_public_id: str,
+        page_size: int = APPEND_BLOCK_LIMIT,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        cursor: str | None = None
+
+        while True:
+            path = f"blocks/{notion_public_id}/children?page_size={page_size}"
+            if cursor:
+                path += f"&start_cursor={cursor}"
+            page = self._request("GET", path)
+            results.extend(page.get("results", []))
+            if not page.get("has_more"):
+                return results
+            cursor = page.get("next_cursor")
 
     def query_database(
         self,

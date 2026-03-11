@@ -1,0 +1,28 @@
+{
+  "version": "1.1",
+  "lanes": {
+    "main":              {"can_code": true,  "can_browse": true,  "can_deploy": false, "write_scope": "full",           "max_timeout_s": 300},
+    "planner":           {"can_code": false, "can_browse": true,  "can_deploy": false, "write_scope": "full",           "max_timeout_s": 120},
+    "coder":             {"can_code": true,  "can_browse": false, "can_deploy": false, "write_scope": "repo",           "max_timeout_s": 600},
+    "reviewer":          {"can_code": false, "can_browse": true,  "can_deploy": false, "write_scope": "github_comments","max_timeout_s": 300},
+    "dev":               {"can_code": true,  "can_browse": true,  "can_deploy": false, "write_scope": "full",           "max_timeout_s": 600},
+    "sentinel":          {"can_code": true,  "can_browse": true,  "can_deploy": false, "write_scope": "alerts_logs",    "max_timeout_s": 120},
+    "sentinel-deploy":   {"can_code": true,  "can_browse": false, "can_deploy": true,  "write_scope": "deploy",         "max_timeout_s": 300},
+    "scout":             {"can_code": false, "can_browse": true,  "can_deploy": false, "write_scope": "memory",         "max_timeout_s": 120},
+    "bayview":           {"can_code": true,  "can_browse": true,  "can_deploy": false, "write_scope": "domain",         "max_timeout_s": 300},
+    "bayview-thinking":  {"can_code": false, "can_browse": true,  "can_deploy": false, "write_scope": "none",           "max_timeout_s": 600},
+    "bayview-tuning":    {"can_code": false, "can_browse": false, "can_deploy": false, "write_scope": "config",         "max_timeout_s": 300},
+    "thinker":           {"can_code": false, "can_browse": true,  "can_deploy": false, "write_scope": "memory",         "max_timeout_s": 900},
+    "ops":               {"can_code": true,  "can_browse": false, "can_deploy": true,  "write_scope": "alerts_logs",    "max_timeout_s": 300}
+  },
+  "dispatch_via_defaults": {
+    "Claude":       "dev",
+    "Claude Code":  "dev",
+    "Gemini":       "dev",
+    "Cursor":       "coder",
+    "Codex":        "coder",
+    "Copilot":      "coder",
+    "Antigravity":  "thinker",
+    "Manual":       null
+  }
+}

@@ -27,6 +27,7 @@ from mcp.server.fastmcp import FastMCP
 
 import block_builder
 import cookie_extract
+import dispatch
 import notion_api
 import notion_client
 import config
@@ -39,6 +40,8 @@ AGENTS_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents.y
 
 mcp = FastMCP(
     "notion-agents",
+    host="0.0.0.0",
+    port=8090,
     instructions=(
         "PROGRAMMATIC EDITS PAUSED: All automated modifications to Notion Agent "
         "configurations are strictly paused for maintenance. Do NOT use create, "
@@ -620,34 +623,59 @@ def get_conversation(thread: str, format: str = "json") -> str:
 
 @mcp.tool()
 @auth_retry
-def chat_with_agent(agent_name: str, message: str, thread_id: str | None = None) -> str:
+def chat_with_agent(agent_name: str, message: str, thread_id: str | None = None,
+                    new_thread: bool = False, wait: bool = False,
+                    timeout: int = 120) -> str:
     """
     Send a message to a Notion AI agent and trigger a response.
-    
+
     agent_name: Registered agent name from agents.yaml.
     message: The content of the message to send.
-    thread_id: Optional UUID of an existing thread to continue. 
-               If omitted, a new thread will NOT be created automatically by this tool
-               (use list_workflow_threads to find a thread first).
-    
-    Returns the message ID and instructions on how to fetch the response.
+    thread_id: Optional UUID of an existing thread to continue.
+    new_thread: If true, always create a fresh thread (ignores thread_id).
+    wait: If true, poll until the agent responds and return the response text.
+    timeout: Max seconds to wait for response (default 120, only used with wait=True).
+
+    If thread_id is omitted and new_thread is false, continues the most recent
+    existing thread or creates one if none exist.
+
+    Returns the agent's response (if wait=True) or the message ID + thread ID.
     """
     with open(AGENTS_YAML) as f:
         registry = yaml.safe_load(f)
-    
+
     cfg = registry.get(agent_name)
     if not cfg:
         raise ValueError(f"Agent '{agent_name}' not found in registry.")
-    
+
     token, user_id = _get_auth()
-    
+    created_new = False
+
+    if new_thread:
+        # NOTE: Programmatically created threads do not trigger inference
+        # on Notion's backend (returns empty streaming response).
+        # For now, require at least one UI-created thread per agent.
+        raise ValueError(
+            f"Programmatic creation of new threads for agent '{agent_name}' is not yet "
+            "supported by Notion's inference backend. Please continue an existing thread "
+            "or start a new one in the Notion UI first."
+        )
+
     if not thread_id:
-        # For now, require an existing thread to prevent ambiguous new thread creation
-        threads = notion_client.list_workflow_threads(cfg['notion_internal_id'], cfg['space_id'], token, user_id, limit=1)
-        if not threads:
-            raise ValueError(f"No existing threads found for agent '{agent_name}'. Please initiate a chat in the UI first.")
-        thread_id = threads[0]['id']
-        print(f"Continuing most recent thread: {thread_id}", file=sys.stderr)
+        # Try to find an existing non-trigger thread
+        threads = notion_client.list_workflow_threads(
+            cfg['notion_internal_id'], cfg['space_id'], token, user_id, limit=5)
+        # Filter out trigger-bound threads
+        manual_threads = [t for t in threads if not t.get('trigger_id')]
+        if manual_threads:
+            thread_id = manual_threads[0]['id']
+            print(f"Continuing most recent thread: {thread_id}", file=sys.stderr)
+        else:
+            raise ValueError(
+                f"No existing threads found for agent '{agent_name}'. "
+                "Please start a chat with this agent in the Notion UI first, "
+                "then retry."
+            )
 
     msg_id = notion_client.send_agent_message(
         thread_id=thread_id,
@@ -656,11 +684,26 @@ def chat_with_agent(agent_name: str, message: str, thread_id: str | None = None)
         content=message,
         token_v2=token,
         user_id=user_id,
-        model=cfg.get('model', 'avocado-froyo-medium')
+        model=cfg.get('model', 'avocado-froyo-medium'),
     )
-    
+
+    thread_note = " (new thread)" if created_new else ""
+
+    if wait:
+        print(f"Waiting for agent response (timeout={timeout}s)...", file=sys.stderr)
+        response = notion_client.wait_for_agent_response(
+            thread_id, msg_id, token, user_id, timeout=timeout)
+        if response:
+            return (
+                f"**Agent response** (thread: {thread_id}{thread_note}):\n\n{response}"
+            )
+        return (
+            f"Agent did not respond within {timeout}s. Thread: {thread_id}{thread_note}.\n"
+            f"Check manually: get_conversation(thread='{thread_id}', format='md')"
+        )
+
     return (
-        f"Message sent (ID: {msg_id}) to thread {thread_id}.\n"
+        f"Message sent (ID: {msg_id}) to thread {thread_id}{thread_note}.\n"
         f"The agent inference has been triggered. Wait a few seconds, then call:\n"
         f"get_conversation(thread='{thread_id}', format='md')"
     )
@@ -1428,8 +1471,95 @@ def grant_resource_access(
     return msg
 
 
+# ── Dispatch tools ───────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def get_dispatchable_items() -> str:
+    """
+    Find Work Items ready for dispatch by an execution plane.
+
+    Returns items where Dispatch Requested=true, Dispatch Requested Consumed At
+    is empty, and Status is Not Started or Prompt Requested.
+    """
+    client = _get_notion_api_client()
+    items = dispatch.get_dispatchable_items(client)
+
+    if not items:
+        return "No dispatchable items found."
+
+    lines = [f"**{len(items)} dispatchable item(s):**\n"]
+    lines.append("| Item Name | Dispatch Via | Lane | Environment | Branch | Project | Type |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for item in items:
+        lines.append(
+            f"| [{item['name']}](https://www.notion.so/{item['id'].replace('-', '')}) "
+            f"| {item.get('dispatch_via') or '—'} "
+            f"| {item.get('execution_lane') or '—'} "
+            f"| {item.get('environment') or '—'} "
+            f"| {item.get('branch') or '—'} "
+            f"| {item.get('project_name') or '—'} "
+            f"| {item.get('type') or '—'} |"
+        )
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def build_dispatch_packet(work_item_id: str) -> str:
+    """
+    Build and validate a dispatch packet for a Work Item.
+
+    Reads the Work Item, resolves inheritance from its Project, applies the
+    Dispatch Via -> Execution Lane default mapping, and runs V1-V12 validation.
+
+    work_item_id: UUID of the Work Item page.
+
+    Returns a validated dispatch packet (JSON) ready for an execution plane,
+    or a list of validation errors if the item is not dispatchable.
+    """
+    client = _get_notion_api_client()
+    result = dispatch.build_dispatch_packet(work_item_id, client)
+
+    if result["errors"]:
+        error_list = "\n".join(f"- {e}" for e in result["errors"])
+        return f"**Validation failed** ({len(result['errors'])} error(s)):\n\n{error_list}"
+
+    packet = result["packet"]
+    audit_note = ""
+    if result.get("_production_audit"):
+        audit_note = "\n\n**Note:** Production environment — elevated access logged."
+
+    return f"**Dispatch packet built successfully.**\n\n```json\n{json.dumps(packet, indent=2)}\n```{audit_note}"
+
+
+@mcp.tool()
+def stamp_dispatch_consumed(work_item_id: str, run_id: str) -> str:
+    """
+    Mark a Work Item as consumed by an execution plane.
+
+    Sets Dispatch Requested=false, Dispatch Requested Consumed At=now(),
+    Status=In Progress, and writes the run_id for idempotency tracking.
+    Also creates an audit log entry.
+
+    work_item_id: UUID of the Work Item page.
+    run_id: The run_id from the dispatch packet (from build_dispatch_packet).
+    """
+    client = _get_notion_api_client()
+    result = dispatch.stamp_dispatch_consumed(work_item_id, run_id, client)
+
+    return (
+        f"**Dispatch consumed.**\n\n"
+        f"- Work Item: `{result['work_item_id']}`\n"
+        f"- Run ID: `{result['run_id']}`\n"
+        f"- Consumed At: `{result['consumed_at']}`\n"
+        f"- Status: In Progress"
+    )
+
+
 def main():
- mcp.run()
+    transport = sys.argv[1] if len(sys.argv) > 1 else "stdio"
+    mcp.run(transport=transport)
 
 
 if __name__ == "__main__":
