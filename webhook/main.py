@@ -592,6 +592,13 @@ def _stamp_dispatch_consumed(page_id: str, run_id: str):
             logger.warning("Audit log write failed in _stamp_dispatch_consumed: %s", e)
 
 
+# Execution planes that support automated forwarding via OpenClaw hook.
+# All other Dispatch Via values (Claude Code, Gemini, Cursor, Codex, Copilot, Manual)
+# require manual dispatch — the work item is stamped consumed and a human operator
+# picks it up in their tool of choice.
+_OPENCLAW_PLANES = {"Claude", "Antigravity"}
+
+
 def _forward_to_openclaw(packet: dict):
     """POST the dispatch packet to OpenClaw to spawn the lane agent."""
     if not OPENCLAW_HOOK_URL:
@@ -611,7 +618,11 @@ def _forward_to_openclaw(packet: dict):
 
 
 def _process_notion_dispatch(page_id: str):
-    """Background task: fetch Work Item, stamp consumed, forward to OpenClaw."""
+    """Background task: fetch Work Item, stamp consumed, route to execution plane.
+
+    OpenClaw planes (Claude, Antigravity) are forwarded automatically.
+    All other planes (Claude Code, Gemini, Cursor, etc.) require manual dispatch.
+    """
     import uuid as _uuid
 
     try:
@@ -662,8 +673,14 @@ def _process_notion_dispatch(page_id: str):
         "dispatch_via": dispatch_via,
         "environment": environment,
     }
-    _forward_to_openclaw(packet)
-    logger.info("Notion dispatch complete: item=%s run_id=%s lane=%s", item_name, run_id, execution_lane)
+    if dispatch_via in _OPENCLAW_PLANES:
+        _forward_to_openclaw(packet)
+    else:
+        logger.info(
+            "Dispatch Via='%s' requires manual dispatch — work item stamped, operator picks up (run_id=%s)",
+            dispatch_via, run_id,
+        )
+    logger.info("Notion dispatch complete: item=%s run_id=%s lane=%s via=%s", item_name, run_id, execution_lane, dispatch_via)
 
 
 @app.post("/notion-dispatch")
