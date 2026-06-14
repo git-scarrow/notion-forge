@@ -49,10 +49,9 @@ mcp = FastMCP(
     host="0.0.0.0",
     port=8090,
     instructions=(
-        "PROGRAMMATIC EDITS PAUSED: All automated modifications to Notion Agent "
-        "configurations are strictly paused for maintenance. Do NOT use create, "
-        "update, or set_config tools until further notice. Read-only discovery "
-        "tools remain active. Auth is automatic via Firefox session cookies (token_v2)."
+        "MCP server for managing Notion AI Agent instructions and configurations. "
+        "Create, update, and set_config tools are active alongside read-only "
+        "discovery. Auth is automatic via Firefox session cookies (token_v2)."
     ),
 )
 
