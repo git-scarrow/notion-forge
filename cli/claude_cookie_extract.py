@@ -4,11 +4,12 @@ cookie_extract.py — Extract Claude.ai cookies from Firefox's SQLite cookie sto
 Adapted from notion-forge/cli/cookie_extract.py (MIT).
 """
 
-import glob
 import os
 import shutil
 import sqlite3
 import tempfile
+
+import firefox_cookies
 
 
 def _query_claude_cookies(db_path: str) -> list[tuple[str, str]]:
@@ -31,26 +32,20 @@ def _query_claude_cookies(db_path: str) -> list[tuple[str, str]]:
         os.unlink(tmp_path)
 
 
+def _has_claude_session(db_path: str) -> bool:
+    """True if this DB holds a live claude.ai session (a sessionKey cookie)."""
+    try:
+        rows = _query_claude_cookies(db_path)
+    except (OSError, sqlite3.Error):
+        return False
+    return bool(dict(rows).get("sessionKey"))
+
+
 def _get_firefox_cookies_db() -> str:
-    """Return the best Firefox cookies.sqlite for Claude auth."""
-    pattern = os.path.expanduser("~/.mozilla/firefox/*/cookies.sqlite")
-    candidates = glob.glob(pattern)
-    if not candidates:
-        raise FileNotFoundError(
-            "No Firefox cookies.sqlite found. "
-            "Ensure Firefox is installed and you have logged into claude.ai."
-        )
-    candidates = sorted(candidates, key=os.path.getmtime, reverse=True)
-    fallback = candidates[0]
-    for db_path in candidates:
-        try:
-            rows = _query_claude_cookies(db_path)
-        except (OSError, sqlite3.Error):
-            continue
-        cookies = {name: value for name, value in rows}
-        if cookies.get("sessionKey"):
-            return db_path
-    return fallback
+    """Return the best Firefox cookies.sqlite for Claude auth (any OS)."""
+    return firefox_cookies.resolve_cookie_db(
+        _has_claude_session, not_found_hint="have logged into claude.ai"
+    )
 
 
 def get_all_cookies() -> dict[str, str]:

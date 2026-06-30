@@ -5,11 +5,12 @@ Inspired by jamalex/notion-py (MIT) — cookie auth pattern.
 https://github.com/jamalex/notion-py
 """
 
-import glob
 import os
 import shutil
 import sqlite3
 import tempfile
+
+import firefox_cookies
 
 
 def _query_notion_auth(db_path: str) -> list[tuple[str, str]]:
@@ -32,31 +33,20 @@ def _query_notion_auth(db_path: str) -> list[tuple[str, str]]:
         os.unlink(tmp_path)
 
 
-def get_firefox_cookies_db() -> str:
-    """Return the best Firefox cookies.sqlite for Notion auth.
+def _has_notion_session(db_path: str) -> bool:
+    """True if this DB holds a live notion.so session (a token_v2 cookie)."""
+    try:
+        rows = _query_notion_auth(db_path)
+    except (OSError, sqlite3.Error):
+        return False
+    return bool(dict(rows).get("token_v2"))
 
-    Prefer the most recently modified profile that actually contains a
-    `token_v2` cookie for notion.so. Fall back to the most recently modified
-    profile only if no candidate currently has a Notion session.
-    """
-    pattern = os.path.expanduser("~/.mozilla/firefox/*/cookies.sqlite")
-    candidates = glob.glob(pattern)
-    if not candidates:
-        raise FileNotFoundError(
-            "No Firefox cookies.sqlite found. "
-            "Ensure Firefox is installed and you have logged into notion.so."
-        )
-    candidates = sorted(candidates, key=os.path.getmtime, reverse=True)
-    fallback = candidates[0]
-    for db_path in candidates:
-        try:
-            rows = _query_notion_auth(db_path)
-        except (OSError, sqlite3.Error):
-            continue
-        cookies = {name: value for name, value in rows}
-        if cookies.get("token_v2"):
-            return db_path
-    return fallback
+
+def get_firefox_cookies_db() -> str:
+    """Return the best Firefox cookies.sqlite for Notion auth (any OS)."""
+    return firefox_cookies.resolve_cookie_db(
+        _has_notion_session, not_found_hint="have logged into notion.so"
+    )
 
 
 def get_auth() -> tuple[str, str | None]:
