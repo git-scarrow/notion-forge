@@ -146,6 +146,17 @@ def _detect_space_id(registry: dict[str, dict[str, Any]], token_v2: str, user_id
     for cfg in registry.values():
         if cfg.get("space_id"):
             return cfg["space_id"]
+    # Check environment / config before hitting the API
+    env_space = os.environ.get("NOTION_SPACE_ID", "")
+    if env_space:
+        return env_space
+    try:
+        from config import get_config
+        cfg_space = get_config().space_id
+        if cfg_space:
+            return cfg_space
+    except Exception:
+        pass
     spaces = notion_agent_config.get_user_spaces(token_v2)
     if len(spaces) == 1:
         return spaces[0]["id"]

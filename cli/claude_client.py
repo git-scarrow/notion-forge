@@ -5,10 +5,17 @@ Uses the internal web API with Firefox session cookie auth.
 """
 
 import json
+import sys
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
 BASE = "https://claude.ai/api"
+
+_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:138.0) Gecko/20100101 Firefox/138.0"
+    if sys.platform == "darwin"
+    else "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0"
+)
 
 
 class ClaudeProjectClient:
@@ -23,7 +30,7 @@ class ClaudeProjectClient:
         req.add_header("Cookie", self.cookie_header)
         req.add_header("Content-Type", "application/json")
         req.add_header("anthropic-client-platform", "web_claude_ai")
-        req.add_header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0")
+        req.add_header("User-Agent", _UA)
 
         try:
             with urlopen(req) as resp:

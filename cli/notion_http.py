@@ -98,7 +98,7 @@ def _post_fire_and_forget(endpoint: str, payload: dict, token_v2: str,
     headers = _make_headers(token_v2, user_id, space_id)
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
-        resp = urllib.request.urlopen(req, timeout=10)
+        resp = urllib.request.urlopen(req, timeout=30)
         # Read a tiny prefix to confirm the server accepted, then close
         resp.read(64)
         resp.close()
