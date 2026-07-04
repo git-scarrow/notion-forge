@@ -1,37 +1,17 @@
 #!/usr/bin/env bash
 # MCP server launcher for claude-projects — Claude.ai Project management tools.
+#
+# Auth is via Firefox session cookies (see claude_cookie_extract.py); this server
+# reads NO 1Password secrets. It therefore must NOT be wrapped in `op run`.
+#
+# It previously did `op run --env-file ~/.env`, which eagerly resolves EVERY op://
+# reference in the shared env file. One unresolvable reference (GITHUB_PAT =
+# op://Remote Access Keys/GitHub PAT/token, not readable by the maintenance
+# service account) aborted the entire launch, so the MCP server never started.
+#
+# CLAUDE_ORG_ID is honored if already present in the environment; otherwise the
+# server discovers the org via the Claude.ai API. Neither path needs op.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PYTHON="$SCRIPT_DIR/.venv/bin/python"
-SERVER="$SCRIPT_DIR/claude_mcp_server.py"
-ENV_LOCAL="$HOME/.env"
-ENV_REMOTE="$HOME/.env.remote"
-SA_TOKEN_FILE="$HOME/.config/op/notion-forge-sa-token"
-SA_TOKEN="${OP_SERVICE_ACCOUNT_TOKEN:-$(cat "$SA_TOKEN_FILE" 2>/dev/null || true)}"
-
-select_env_file() {
-    if [[ -f "$1" ]]; then
-        printf '%s\n' "$1"
-    elif [[ -f "$2" ]]; then
-        printf '%s\n' "$2"
-    else
-        return 1
-    fi
-}
-
-# Try local (biometric) auth first; fall back to service account
-if op account get &>/dev/null 2>&1; then
-    ENV_FILE="$(select_env_file "$ENV_LOCAL" "$ENV_REMOTE")" || {
-        echo "No env file found. Expected $ENV_LOCAL or $ENV_REMOTE." >&2
-        exit 1
-    }
-    exec op run --env-file "$ENV_FILE" --no-masking -- "$PYTHON" "$SERVER"
-else
-    export OP_SERVICE_ACCOUNT_TOKEN="$SA_TOKEN"
-    ENV_FILE="$(select_env_file "$ENV_REMOTE" "$ENV_LOCAL")" || {
-        echo "No env file found. Expected $ENV_REMOTE or $ENV_LOCAL." >&2
-        exit 1
-    }
-    exec op run --env-file "$ENV_FILE" --no-masking -- "$PYTHON" "$SERVER"
-fi
+exec "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/claude_mcp_server.py"
