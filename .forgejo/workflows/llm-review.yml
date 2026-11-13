@@ -31,21 +31,16 @@ jobs:
       - name: LLM per-file review
         env:
           CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
-          # Route through the LiteLLM front door on the Proxmox inference-stack
-          # (CT110 :4000). The legacy aws-ec2:8002 307-balancer is deprecated and
-          # now hangs (single backend node, 180s/0-byte). The OpenAI path sends
-          # Bearer auth (LiteLLM enforces keys); the ollama path does not, so it
-          # is unusable here.
-          REVIEW_PROVIDER: openai
-          OPENAI_BASE_URL: http://100.64.0.6:4000/v1
-          OPENAI_API_KEY: ${{ secrets.LITELLM_API_KEY }}
-          OPENAI_MODEL: llb-chat-qwen3-8b
-          # Fast-fail fallback: keep LLM_HOST/FALLBACK on LiteLLM (401s instantly
-          # without auth) instead of the dead :8002 default, so a key failure
-          # surfaces immediately rather than hanging the runner.
+          # Fleet-standard engine (same as scarrow/writing): LiteLLM gateway (tailnet)
+          # -> LLB P2C coder pool (Qwen3-Coder-30B across m2+m4) via chat/completions
+          # with Bearer auth. Local metal only, zero cloud cost (LLM_API_KEY = user-level
+          # secret, key scoped to llb/*). Replaces llb-chat-qwen3-8b, retired with
+          # qwen3:8b in the 2026-11 model refresh; its thinking model could also spend
+          # max_output_tokens on reasoning and return an empty review.
+          REVIEW_PROVIDER: ollama
           LLM_HOST: http://100.64.0.6:4000
-          LLM_FALLBACK: http://100.64.0.6:4000
-          LLM_MODEL: llb-chat-qwen3-8b
+          LLM_MODEL: llb/code:latest
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
