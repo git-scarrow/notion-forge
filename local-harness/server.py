@@ -17,7 +17,7 @@ POST /agent/run
 
 GET /  -> health + active backend/model.
 
-Run:  python local-harness/server.py [--port 8088] [--backend ollama] [--model qwen3:32b]
+Run:  python local-harness/server.py [--port 8088] [--backend ollama] [--model qwen3.8:27b]
 """
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ def main():
     ap.add_argument("--port", type=int, default=8088)
     ap.add_argument("--backend", default="ollama",
                     choices=["ollama", "fireworks", "openai"])
-    ap.add_argument("--model", default="qwen3:32b")
+    ap.add_argument("--model", default="qwen3.8:27b")
     ap.add_argument("--base", default=None)
     ap.add_argument("--api-key", default="")
     args = ap.parse_args()

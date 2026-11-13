@@ -17,7 +17,7 @@ Two things are being replicated:
      sampling: temperature=1.0, top_p=0.95, top_k=40.
 
 The real model (~230B MoE) does not fit a 16 GB GPU, so the default backend is
-local Ollama `qwen3:32b` — also a <think>-tag interleaved-thinking model, the
+local Ollama `qwen3.8:27b` — also a <think>-tag interleaved-thinking model, the
 same harness contract on different weights. Flip BACKEND to point at the real
 Fireworks-hosted M2.5 or a vLLM box (see make_backend()).
 
@@ -144,7 +144,7 @@ class OllamaBackend(Backend):
     name = "ollama"
 
     def __init__(self, base: str = "http://localhost:11434",
-                 model: str = "qwen3:32b", timeout: float = 600.0,
+                 model: str = "qwen3.8:27b", timeout: float = 600.0,
                  sampling: Optional[dict] = None):
         self.base = base.rstrip("/")
         self.model = model
@@ -299,7 +299,7 @@ class MockBackend(Backend):
 def make_backend(kind: str = "ollama", **kw) -> Backend:
     """Backend switch.
 
-    kind="ollama"   -> local qwen3:32b (default; what runs locally here)
+    kind="ollama"   -> local qwen3.8:27b (default; what runs locally here)
     kind="fireworks"-> the real Notion path: MiniMax M2.5 on Fireworks
                        (needs api_key; base/model preset below)
     kind="openai"   -> any OpenAI-compatible base (vLLM/SGLang/llama.cpp)

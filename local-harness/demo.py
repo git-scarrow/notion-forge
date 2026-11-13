@@ -6,7 +6,7 @@ Demo / self-test driver for the local harness.
         retention contract and the multi-tool loop WITHOUT an LLM. Exits
         non-zero on contract violation.
 
-  python local-harness/demo.py [--backend ollama] [--model qwen3:32b]
+  python local-harness/demo.py [--backend ollama] [--model qwen3.8:27b]
                                [--prompt "..."] [--max-steps 6]
         Live end-to-end run, prints the think -> tool -> think -> answer trace.
 """
@@ -139,7 +139,7 @@ def main() -> int:
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--backend", default="ollama",
                     choices=["ollama", "fireworks", "openai"])
-    ap.add_argument("--model", default="qwen3:32b")
+    ap.add_argument("--model", default="qwen3.8:27b")
     ap.add_argument("--base", default=None)
     ap.add_argument("--api-key", default="")
     ap.add_argument("--prompt", default=DEFAULT_PROMPT)

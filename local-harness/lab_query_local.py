@@ -1,6 +1,6 @@
 """Local Lab Query — a zero-credit clone of Notion's Lab Query agent.
 
-Runs the local-harness interleaved-thinking loop (default Ollama `qwen3:32b`)
+Runs the local-harness interleaved-thinking loop (default Ollama `qwen3.8:27b`)
 over notion-forge's credit-free Notion read tools, with the live Lab Query
 system prompt (`cli/agent_instructions/lab_query.md`) as the transcript config.
 

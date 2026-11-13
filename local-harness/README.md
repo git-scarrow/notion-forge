@@ -34,14 +34,14 @@ content from history, agentic quality drops. A faithful clone must keep it.
 - `demo.py` — `--selftest` (deterministic, no LLM) and a live trace runner.
 
 **The real M2.5 doesn't fit a 16 GB GPU**, so the default backend is local
-Ollama **`qwen3:32b`** — *also* a `<think>`-tag interleaved-thinking model with
+Ollama **`qwen3.8:27b`** — *also* a `<think>`-tag interleaved-thinking model with
 `tools`+`thinking` capability. Same harness contract, different weights. The
 backend is a one-line switch to the real Fireworks-hosted M2.5 or a vLLM box.
 
 ## Run it
 
 Requires only Python 3 stdlib. Local default needs Ollama serving an
-interleaved-thinking model (`ollama pull qwen3:32b`).
+interleaved-thinking model (`ollama pull qwen3.8:27b`).
 
 ```bash
 cd local-harness
@@ -49,7 +49,7 @@ cd local-harness
 # 1. Deterministic contract test — no LLM, proves the loop + thinking retention
 python3 demo.py --selftest
 
-# 2. Live trace against local qwen3:32b
+# 2. Live trace against local qwen3.8:27b
 python3 demo.py                       # default Lab-flavored multi-tool prompt
 python3 demo.py --prompt "what is 19*23 then word-count the result"
 
